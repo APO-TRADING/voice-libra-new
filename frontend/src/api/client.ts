@@ -1,81 +1,63 @@
-// API client for Beppe Audiobooks backend.
-const BASE = process.env.EXPO_PUBLIC_BACKEND_URL || '';
+// API facade — now 100% local (no backend). Same interface as before so
+// screens don't need refactoring. Reads the picked file from filesystem,
+// cleans, splits sentences, stores in AsyncStorage.
+import * as FileSystem from 'expo-file-system/legacy';
+import { library, type BookSummary as LBookSummary, type BookFull as LBookFull, type Folder as LFolder } from '../storage/library';
+import { cleanText, countWords, splitSentences } from '../storage/textProcessor';
 
-export type BookSummary = {
-  id: string;
-  title: string;
-  cover_url: string | null;
-  folder_id: string | null;
-  word_count: number;
-  sentence_count: number;
-  current_sentence_index: number;
-  length_scale: number;
-  created_at: string;
-  updated_at: string;
-};
+export type BookSummary = LBookSummary;
+export type BookFull = LBookFull;
+export type Folder = LFolder;
 
-export type BookFull = BookSummary & {
-  content: string;
-  sentences: string[];
-};
-
-export type Folder = { id: string; name: string; created_at: string };
-
-async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, init);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`${res.status}: ${text}`);
+async function readText(uri: string, name: string): Promise<string> {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  if (ext === 'txt') {
+    return FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.UTF8 });
   }
-  return res.json();
+  // Other formats not yet supported in offline mode.
+  throw new Error(
+    `Formato .${ext} non supportato offline. Converti in .txt prima di caricare (puoi usare lo script text-converter-cleaner-v5.py incluso nel repo).`,
+  );
 }
 
 export const api = {
-  listBooks: (folderId?: string) => {
-    const q = folderId !== undefined ? `?folder_id=${encodeURIComponent(folderId)}` : '';
-    return jsonFetch<BookSummary[]>(`/api/books${q}`);
-  },
-  getBook: (id: string) => jsonFetch<BookFull>(`/api/books/${id}`),
+  listBooks: (folderId?: string) => library.listBooks(folderId),
+  getBook: (id: string) => library.getBook(id),
   updateBook: (id: string, body: Partial<{ title: string; cover_url: string | null; folder_id: string | null; length_scale: number }>) =>
-    jsonFetch<BookSummary>(`/api/books/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }),
+    library.updateBook(id, body),
   updateProgress: (id: string, current_sentence_index: number) =>
-    jsonFetch<BookSummary>(`/api/books/${id}/progress`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ current_sentence_index }),
-    }),
-  deleteBook: (id: string) =>
-    jsonFetch<{ ok: boolean }>(`/api/books/${id}`, { method: 'DELETE' }),
-
-  uploadBook: async (file: { uri: string; name: string; mimeType?: string }, opts?: { title?: string; cover_url?: string; folder_id?: string }) => {
-    const form = new FormData();
-    // @ts-expect-error RN FormData file shape
-    form.append('file', { uri: file.uri, name: file.name, type: file.mimeType || 'application/octet-stream' });
-    if (opts?.title) form.append('title', opts.title);
-    if (opts?.cover_url) form.append('cover_url', opts.cover_url);
-    if (opts?.folder_id) form.append('folder_id', opts.folder_id);
-    const res = await fetch(`${BASE}/api/books/upload`, { method: 'POST', body: form });
-    if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
-    return (await res.json()) as BookSummary;
+    library.updateProgress(id, current_sentence_index),
+  deleteBook: async (id: string) => {
+    await library.deleteBook(id);
+    return { ok: true };
   },
 
-  listFolders: () => jsonFetch<Folder[]>('/api/folders'),
-  createFolder: (name: string) =>
-    jsonFetch<Folder>('/api/folders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    }),
-  updateFolder: (id: string, name: string) =>
-    jsonFetch<Folder>(`/api/folders/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    }),
-  deleteFolder: (id: string) =>
-    jsonFetch<{ ok: boolean }>(`/api/folders/${id}`, { method: 'DELETE' }),
+  uploadBook: async (
+    file: { uri: string; name: string; mimeType?: string },
+    opts?: { title?: string; cover_url?: string; folder_id?: string },
+  ): Promise<BookSummary> => {
+    const raw = await readText(file.uri, file.name);
+    const cleaned = cleanText(raw);
+    const sentences = splitSentences(cleaned);
+    if (sentences.length === 0) {
+      throw new Error('Documento vuoto dopo la pulizia');
+    }
+    const fallbackTitle = file.name.replace(/\.[^.]+$/, '') || 'Senza titolo';
+    return library.addBook({
+      title: (opts?.title?.trim() || fallbackTitle).slice(0, 200),
+      cover_url: opts?.cover_url || null,
+      folder_id: opts?.folder_id || null,
+      content: cleaned,
+      sentences,
+      word_count: countWords(cleaned),
+    });
+  },
+
+  listFolders: () => library.listFolders(),
+  createFolder: (name: string) => library.createFolder(name),
+  updateFolder: (id: string, name: string) => library.updateFolder(id, name),
+  deleteFolder: async (id: string) => {
+    await library.deleteFolder(id);
+    return { ok: true };
+  },
 };

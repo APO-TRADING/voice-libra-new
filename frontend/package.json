@@ -68,7 +68,9 @@
     "doctor": {
       "reactNativeDirectoryCheck": {
         "listUnknownPackages": false,
-        "exclude": ["react-native-sherpa-onnx-offline-tts"]
+        "exclude": [
+          "react-native-sherpa-onnx-offline-tts"
+        ]
       }
     }
   },
