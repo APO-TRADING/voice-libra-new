@@ -3,6 +3,13 @@ import { Book, Folder, Settings, Upload } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../src/contexts/ThemeContext';
 
+type IconProps = { color: string; size: number };
+
+const LibraryIcon = ({ color, size }: IconProps) => <Book color={color} size={size} />;
+const FolderIcon = ({ color, size }: IconProps) => <Folder color={color} size={size} />;
+const UploadIcon = ({ color, size }: IconProps) => <Upload color={color} size={size} />;
+const SettingsIcon = ({ color, size }: IconProps) => <Settings color={color} size={size} />;
+
 export default function TabsLayout() {
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
@@ -25,34 +32,10 @@ export default function TabsLayout() {
         tabBarLabelStyle: { fontSize: 11, fontWeight: '600' },
       }}
     >
-      <Tabs.Screen
-        name="index"
-        options={{
-          title: 'Libreria',
-          tabBarIcon: ({ color, size }) => <Book color={color} size={size} />,
-        }}
-      />
-      <Tabs.Screen
-        name="folders"
-        options={{
-          title: 'Cartelle',
-          tabBarIcon: ({ color, size }) => <Folder color={color} size={size} />,
-        }}
-      />
-      <Tabs.Screen
-        name="upload"
-        options={{
-          title: 'Carica',
-          tabBarIcon: ({ color, size }) => <Upload color={color} size={size} />,
-        }}
-      />
-      <Tabs.Screen
-        name="settings"
-        options={{
-          title: 'Impostazioni',
-          tabBarIcon: ({ color, size }) => <Settings color={color} size={size} />,
-        }}
-      />
+      <Tabs.Screen name="index" options={{ title: 'Libreria', tabBarIcon: LibraryIcon }} />
+      <Tabs.Screen name="folders" options={{ title: 'Cartelle', tabBarIcon: FolderIcon }} />
+      <Tabs.Screen name="upload" options={{ title: 'Carica', tabBarIcon: UploadIcon }} />
+      <Tabs.Screen name="settings" options={{ title: 'Impostazioni', tabBarIcon: SettingsIcon }} />
     </Tabs>
   );
 }
