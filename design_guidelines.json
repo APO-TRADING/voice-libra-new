@@ -1,0 +1,104 @@
+{
+  "theme": "Dark/Light Toggle (Archetype 5: Jewel & Luxury - Premium, Cinematic, Calm)",
+  "color_palette": {
+    "dark": {
+      "background": "#0A0A0C",
+      "surface": "#18181B",
+      "primary": "#E6D5B8",
+      "primary_active": "#D4AF37",
+      "text_primary": "#F7F7F8",
+      "text_secondary": "#A1A1AA",
+      "border": "#27272A",
+      "highlight_sentence": "rgba(212, 175, 55, 0.2)"
+    },
+    "light": {
+      "background": "#FDFBF7",
+      "surface": "#FFFFFF",
+      "primary": "#1A362D",
+      "primary_active": "#0F211B",
+      "text_primary": "#18181B",
+      "text_secondary": "#71717A",
+      "border": "#E4E4E7",
+      "highlight_sentence": "rgba(238, 221, 187, 0.6)"
+    }
+  },
+  "typography": {
+    "rules": "DO NOT use Inter or Roboto for headings. Pair a classic Serif for book titles with a clean geometric Sans for the UI.",
+    "headings": {
+      "fontFamily": "Playfair Display, serif (Fallback to System Serif)",
+      "weights": ["600", "700"],
+      "usage": "Book Titles, Screen Headers, Empty State Headers"
+    },
+    "body": {
+      "fontFamily": "Manrope, sans-serif (Fallback to System Sans)",
+      "weights": ["400", "500", "600"],
+      "usage": "UI labels, player controls, settings, paragraphs, sentence text"
+    },
+    "scales": {
+      "h1": "text-4xl (36px) tracking-tight",
+      "h2": "text-2xl (24px) tracking-tight",
+      "body": "text-base (16px) leading-relaxed",
+      "caption": "text-sm (14px) tracking-wider uppercase"
+    }
+  },
+  "layout_and_spacing": {
+    "screen_padding": "px-6 (24px)",
+    "card_radius": "rounded-2xl (16px) or rounded-3xl (24px) for premium feel",
+    "button_radius": "rounded-full (9999px)",
+    "spacing_scale": "Use 16px, 24px, 32px, 48px. Avoid tight, cluttered spacing.",
+    "alignment": "Left-align text wherever possible. Never center paragraphs or long lists of sentences."
+  },
+  "components": {
+    "bottom_navigation": {
+      "style": "Solid background matching 'surface' color with 1px top border matching 'border' color. Padding bottom for safe area.",
+      "labels": "Italian: Libreria, Cartelle, Carica, Impostazioni",
+      "icons": "lucide-react-native (Book, Folder, Upload, Settings)"
+    },
+    "mini_player": {
+      "style": "Floating absolute above bottom nav. Surface background, shadow-lg, rounded-xl. Contains mini cover, title, play/pause.",
+      "layout": "Row based, flex-row, items-center. Left-aligned text."
+    },
+    "full_player": {
+      "hero_image": "Top section. Book cover with large rounded corners. Do NOT apply heavy dark overlays that ruin the image.",
+      "text_scroller": "Middle section. Left-aligned sentences. The active spoken sentence receives 'highlight_sentence' background + primary text color for high contrast.",
+      "controls": "Bottom section. Large elegant play button (64px). Skip buttons (-/+ 1, 5, 10 sentences) arranged cleanly. Length scale slider uses a thin track."
+    },
+    "library_grid": {
+      "style": "2 columns (gap-4). Cover aspect ratio 2:3. Book title below cover, 1 line truncate. No generic borders, let the cover stand out."
+    },
+    "library_list": {
+      "style": "Horizontal row. Small 64x96 cover. Title and meta information on the right. Left-aligned."
+    },
+    "forms_and_modals": {
+      "style": "Use Shadcn-like primitives but translated to React Native. Large touch targets (min 44px height). Action sheets for context menus."
+    }
+  },
+  "image_urls": {
+    "book_covers": [
+      {
+        "url": "https://images.unsplash.com/photo-1769490315625-6e669d53e698?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjh8MHwxfHNlYXJjaHwxfHxtaW5pbWFsaXN0JTIwYm9vayUyMGNvdmVyJTIwZGVzaWdufGVufDB8fHx8MTc3ODQyNzM2OHww&ixlib=rb-4.1.0&q=85",
+        "description": "Minimalist light green book"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1768866898428-82a44cddd0e9?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjh8MHwxfHNlYXJjaHwyfHxtaW5pbWFsaXN0JTIwYm9vayUyMGNvdmVyJTIwZGVzaWdufGVufDB8fHx8MTc3ODQyNzM2OHww&ixlib=rb-4.1.0&q=85",
+        "description": "Closed book with feather"
+      }
+    ],
+    "empty_states": [
+      {
+        "url": "https://images.unsplash.com/photo-1682256781111-9d20db9ca5a0?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxNzV8MHwxfHNlYXJjaHwyfHxlbXB0eSUyMGJvb2tzaGVsZiUyMG1pbmltYWx8ZW58MHx8fHwxNzc4NDI3MzcxfDA&ixlib=rb-4.1.0&q=85",
+        "description": "Empty minimal bookshelf for empty library/folder view"
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "You are building an Expo React Native app using .js files.",
+    "Do NOT use placeholder text or services like via.placeholder.com. Rely entirely on the provided image_urls.",
+    "Apply the styling using React Native StyleSheet or NativeWind (if installed). The spacing scale reflects Tailwind logic (e.g., p-6 = padding: 24).",
+    "UI strings MUST be entirely in Italian: 'Libreria' (Library), 'Riproduci' (Player/Play), 'Cartelle' (Folders), 'Carica' (Upload), 'Impostazioni' (Settings).",
+    "Sentence highlight feature: When reading, standard text should be 'text_secondary', active text should be 'text_primary' + bold + highlighted background. Left-align the reading text for proper literary feel.",
+    "Do NOT use standard purple/teal gradients. Stick to the 'Jewel & Luxury' natural elegant colors.",
+    "Use 'lucide-react-native' for all icons.",
+    "Test IDs are MANDATORY for all interactive and key informational elements (e.g., testID='play-pause-button', testID='library-grid-toggle')."
+  ]
+}
