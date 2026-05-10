@@ -37,3 +37,7 @@ yarn-error.*
 *.tsbuildinfo
 
 app-example
+
+# Piper model assets MUST be tracked (force-include in case of stray rules above)
+!assets/piper/
+!assets/piper/**

@@ -1,0 +1,9 @@
+# Force git to track Piper model assets as binary and never filter/ignore them.
+# Without these rules some setups (Windows Git, GitHub Desktop) may treat .onnx
+# as text and corrupt the file, or skip .zip due to overzealous .gitignore.
+*.onnx          binary -text -diff
+*.bin           binary -text -diff
+*.zip           binary -text -diff
+
+# Make sure model assets are kept verbatim
+frontend/assets/piper/**          binary -text -diff
