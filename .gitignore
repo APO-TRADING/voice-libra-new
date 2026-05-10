@@ -79,4 +79,5 @@ agenthub/agents/youtube/db
 memory/test_credentials.md
 
 # Mobile development
-android-sdk/
+android-sdk/frontend/node_modules/react-native-sherpa-onnx-offline-tts/build-ios/ios-onnxruntime/1.17.1/onnxruntime.xcframework/ios-arm64_x86_64-simulator/onnxruntime.a
+frontend/node_modules/react-native-sherpa-onnx-offline-tts/build-ios/ios-onnxruntime/1.17.1/onnxruntime.xcframework/macos-arm64_x86_64/onnxruntime.a

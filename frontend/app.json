@@ -1,37 +1,61 @@
 {
   "expo": {
-    "name": "frontend",
-    "slug": "frontend",
+    "name": "Beppe Audiobooks",
+    "slug": "beppe-audiobooks",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "frontend",
+    "scheme": "beppe",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.beppe.audiobooks",
+      "infoPlist": {
+        "UIBackgroundModes": ["audio"],
+        "NSPhotoLibraryUsageDescription": "Scegli una copertina per i libri",
+        "NSDocumentsFolderUsageDescription": "Carica eBook in libreria"
+      }
     },
     "android": {
+      "package": "com.beppe.audiobooks",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#000"
+        "backgroundColor": "#0A0A0C"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "READ_EXTERNAL_STORAGE",
+        "WAKE_LOCK",
+        "FOREGROUND_SERVICE"
+      ]
     },
     "web": {
       "bundler": "metro",
       "output": "static",
       "favicon": "./assets/images/favicon.png"
     },
+    "assetBundlePatterns": [
+      "assets/**/*",
+      "assets/piper/**/*"
+    ],
     "plugins": [
       "expo-router",
+      "expo-asset",
+      [
+        "expo-build-properties",
+        {
+          "android": { "compileSdkVersion": 35, "targetSdkVersion": 35, "minSdkVersion": 24 },
+          "ios": { "deploymentTarget": "15.1" }
+        }
+      ],
       [
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 200,
           "resizeMode": "contain",
-          "backgroundColor": "#000"
+          "backgroundColor": "#0A0A0C"
         }
       ]
     ],
