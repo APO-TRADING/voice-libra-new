@@ -1,12 +1,11 @@
-// All Piper assets are PRE-BUNDLED in the repo. The user replaces ONLY
-// beppe.onnx and beppe.onnx.json with their own files.
-//
-// espeak-ng-data is stored as a renamed zip (.bin) to dodge git/.gitignore
-// rules that strip .zip files on some setups.
+// Asset Piper pre-bundlati. L'utente sostituisce SOLO:
+//   - assets/piper/beppe.onnx
+//   - assets/piper/beppe.onnx.json
+// tokens.txt viene auto-generato a runtime dal phoneme_id_map nel .json.
+// espeak-ng-data.bin (fonemizzatore italiano) resta invariato.
 export const PIPER_ASSETS = {
   model: require('../../assets/piper/beppe.onnx'),
   config: require('../../assets/piper/beppe.onnx.json'),
-  tokens: require('../../assets/piper/tokens.txt'),
   espeakZip: require('../../assets/piper/espeak-ng-data.bin'),
 } as const;
 
