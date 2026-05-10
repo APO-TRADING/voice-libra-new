@@ -112,6 +112,7 @@ export default function Library() {
         </View>
       ) : viewMode === 'grid' ? (
         <FlatList
+          key="grid"
           data={books}
           numColumns={2}
           keyExtractor={(b) => b.id}
@@ -136,6 +137,7 @@ export default function Library() {
         />
       ) : (
         <FlatList
+          key="list"
           data={books}
           keyExtractor={(b) => b.id}
           contentContainerStyle={{ paddingHorizontal: 24, paddingBottom: 96, gap: 16, paddingTop: 8 }}

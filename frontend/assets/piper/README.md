@@ -1,39 +1,54 @@
 # Modelli Piper — Pre-bundlati
 
-L'app legge tutto **on-device, offline**. Qui ci sono i 3 file pre-bundlati:
+L'app legge tutto **on-device, offline**. Qui ci sono i 3 file richiesti:
 
-| File                    | Cos'è                                            | Va sostituito? |
-| ----------------------- | ------------------------------------------------ | :------------: |
-| `beppe.onnx`            | Il modello Piper                                 |  ✅ **SÌ**    |
-| `beppe.onnx.json`       | Config del modello (sample rate + phoneme map)   |  ✅ **SÌ**    |
-| `espeak-ng-data.bin`    | Dati fonemi italiani (espeak-ng zippato)         |     ❌ NO     |
+| File                    | Cos'è                                                   | Modifica? |
+| ----------------------- | ------------------------------------------------------- | :-------: |
+| `beppe.onnx`            | Modello Piper **con metadata sherpa-onnx**             |  ✅ SÌ    |
+| `tokens.txt`            | Mappa fonemi → ID, generato dal `.json`                |  ✅ SÌ    |
+| `espeak-ng-data.bin`    | Dati fonemizzatore italiano (lascia stare)             |  ❌ NO    |
 
-> Da questa versione **non c'è più tokens.txt**: l'app lo auto-genera dal
-> `phoneme_id_map` contenuto nel tuo `beppe.onnx.json` al primo avvio.
+## ⚠️ IMPORTANTE: il modello DEVE essere preparato
 
-## Per usare la TUA voce
+Il `beppe.onnx` originale di Piper **non funziona così com'è** con sherpa-onnx.
+Va trasformato: si aggiungono dei metadata interni (model_type=vits, ecc.) e
+si genera `tokens.txt` dal `phoneme_id_map` contenuto nel `.json`.
 
-**Sostituisci 2 file:**
+Lo script `scripts/prepare_piper_model.py` fa tutto in automatico.
+
+## Procedura per usare la TUA voce (4 comandi)
+
 ```bash
+# 1. Metti i tuoi 2 file ORIGINALI in assets/piper/
 cp /tuo/percorso/beppe.onnx       frontend/assets/piper/beppe.onnx
 cp /tuo/percorso/beppe.onnx.json  frontend/assets/piper/beppe.onnx.json
-```
 
-Poi build:
-```bash
+# 2. Installa la dipendenza Python (una volta)
+pip install onnx==1.17.0
+
+# 3. Lancia lo script di preparazione (dalla radice del repo)
+python scripts/prepare_piper_model.py
+# Aggiunge metadata a beppe.onnx, crea tokens.txt.
+# Il file beppe.onnx.json a questo punto è inutile, lo puoi cancellare.
+
+# 4. Build APK
 cd frontend
 npx expo prebuild --clean
 eas build --platform android --profile preview --clear-cache
 ```
 
-Fine. Il codice TypeScript non va toccato.
+Installa l'APK. Vai in **Impostazioni → MOTORE TTS**:
+- ✅ "Piper on-device attivo" → tutto OK, la voce è la tua
+- ❌ Errore → mandami il testo del messaggio
 
 ## Cosa fa l'app al primo avvio
 
-1. Copia `beppe.onnx` + `beppe.onnx.json` in `/data/data/.../files/piper/`
-2. Legge `beppe.onnx.json`, estrae il `phoneme_id_map` e scrive `tokens.txt` in formato sherpa
-3. Unzippa `espeak-ng-data.bin` in `piper/espeak-ng-data/`
-4. Inizializza sherpa-onnx con il config completo
-5. Da quel momento, la riproduzione è **istantanea e offline**
+1. Copia `beppe.onnx` e `tokens.txt` in `/data/data/.../files/piper/`
+2. Unzippa `espeak-ng-data.bin` in `piper/espeak-ng-data/`
+3. Inizializza sherpa-onnx con i path assoluti
+4. Da quel momento la riproduzione è **istantanea e offline**
 
-Se vuoi vedere se Piper si è caricato correttamente: vai in **Impostazioni → MOTORE TTS**. Deve mostrare "Piper on-device attivo". Se mostra un errore, il messaggio dirà esattamente in che step è fallito.
+## Riferimenti
+
+- Procedura ufficiale sherpa-onnx + Piper:
+  https://k2-fsa.github.io/sherpa/onnx/tts/piper.html

@@ -1,12 +1,15 @@
 // On-device Piper TTS engine using react-native-sherpa-onnx-offline-tts.
 // Real-time, offline, no server. Assets are pre-bundled in the APK.
 //
+// The bundled beppe.onnx MUST be the version produced by
+// scripts/prepare_piper_model.py — i.e., a Piper .onnx with sherpa-onnx
+// metadata injected (model_type=vits, comment=piper, has_espeak=1, ...).
+// Without those metadata sherpa-onnx will refuse to load the model.
+//
 // At first launch:
-//   1) Copy beppe.onnx + beppe.onnx.json to documents/piper/
-//   2) Auto-generate tokens.txt from the phoneme_id_map inside beppe.onnx.json
-//      (so the user only needs to ship 2 files: the .onnx and its .json)
-//   3) Unzip espeak-ng-data.bin → documents/piper/espeak-ng-data/
-//   4) Init sherpa-onnx with full OfflineTtsConfig
+//   1) Copy beppe.onnx + tokens.txt to documents/piper/
+//   2) Unzip espeak-ng-data.bin → documents/piper/espeak-ng-data/
+//   3) Init sherpa-onnx with full OfflineTtsConfig
 import { Asset } from 'expo-asset';
 import * as FileSystem from 'expo-file-system/legacy';
 import { unzipSync } from 'fflate';
@@ -41,35 +44,6 @@ async function copyAsset(modId: number, destName: string): Promise<string> {
   const src = asset.localUri || asset.uri;
   if (!src) throw new Error(`Asset ${destName} ha localUri vuoto`);
   await FileSystem.copyAsync({ from: src, to: dest });
-  return dest;
-}
-
-// Build a sherpa-onnx compatible tokens.txt from the Piper phoneme_id_map.
-// Format: one line per token, "<symbol> <id>" — IDs sorted ascending.
-async function generateTokensFromConfig(configPath: string): Promise<string> {
-  const dest = `${DEST_DIR}/tokens.txt`;
-  const info = await FileSystem.getInfoAsync(dest);
-  if (info.exists) return dest;
-  const raw = await FileSystem.readAsStringAsync(configPath, { encoding: FileSystem.EncodingType.UTF8 });
-  const cfg = JSON.parse(raw) as { phoneme_id_map?: Record<string, number[]> };
-  const map = cfg.phoneme_id_map;
-  if (!map || typeof map !== 'object') {
-    throw new Error("beppe.onnx.json non contiene 'phoneme_id_map'");
-  }
-  // Flatten: each symbol may map to a list of ids (most have 1).
-  const pairs: { id: number; sym: string }[] = [];
-  for (const sym of Object.keys(map)) {
-    const ids = map[sym];
-    if (Array.isArray(ids) && ids.length > 0 && typeof ids[0] === 'number') {
-      pairs.push({ id: ids[0], sym });
-    }
-  }
-  pairs.sort((a, b) => a.id - b.id);
-  const lines = pairs.map((p) => `${p.sym === ' ' ? '<space>' : p.sym} ${p.id}`);
-  // sherpa-onnx convention: blank line for space if needed; some forks expect
-  // literal space. We use <space> sentinel for the ' ' symbol if present, and
-  // also write an explicit space row to be safe.
-  await FileSystem.writeAsStringAsync(dest, lines.join('\n') + '\n', { encoding: FileSystem.EncodingType.UTF8 });
   return dest;
 }
 
@@ -126,10 +100,8 @@ export async function initEngine(): Promise<boolean> {
 
       lastStep = 'copy-model';
       const modelPathU = await copyAsset(PIPER_ASSETS.model, 'beppe.onnx');
-      lastStep = 'copy-config';
-      const configPathU = await copyAsset(PIPER_ASSETS.config, 'beppe.onnx.json');
-      lastStep = 'gen-tokens';
-      const tokensPathU = await generateTokensFromConfig(configPathU);
+      lastStep = 'copy-tokens';
+      const tokensPathU = await copyAsset(PIPER_ASSETS.tokens, 'tokens.txt');
       lastStep = 'unzip-espeak';
       const dataDirPathU = await unzipEspeak(PIPER_ASSETS.espeakZip);
 
