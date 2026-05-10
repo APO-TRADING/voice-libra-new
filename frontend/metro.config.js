@@ -5,6 +5,12 @@ const { FileStore } = require('metro-cache');
 
 const config = getDefaultConfig(__dirname);
 
+// Allow Piper assets (.onnx model + .zip espeak-ng-data) to be bundled via require().
+// .txt is already in defaults; .onnx and .zip are not.
+const extra = ['onnx', 'zip', 'bin', 'txt'];
+config.resolver.assetExts = Array.from(new Set([...(config.resolver.assetExts || []), ...extra]));
+config.resolver.sourceExts = (config.resolver.sourceExts || []).filter((e) => !extra.includes(e));
+
 // Use a stable on-disk store (shared across web/android)
 const root = process.env.METRO_CACHE_ROOT || path.join(__dirname, '.metro-cache');
 config.cacheStores = [

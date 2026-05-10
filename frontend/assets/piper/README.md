@@ -1,41 +1,38 @@
-# Piper TTS — On-Device Models
+# Modelli Piper — Pre-bundlati
 
-Questo è il punto di ingresso per il motore Piper. **L'app usa questi file
-direttamente sul dispositivo**, senza alcun server.
+Questa cartella contiene **già tutto il necessario** per far parlare l'app.
 
-## File richiesti
+| File                    | Cos'è                                                            | Va modificato? |
+| ----------------------- | ---------------------------------------------------------------- | :------------: |
+| `beppe.onnx`            | Modello Piper (voce italiana di default = Riccardo)             |  ✅ **SÌ**    |
+| `beppe.onnx.json`       | Config del modello (sample rate, fonemi → ID)                   |  ✅ **SÌ**    |
+| `tokens.txt`            | Mappa fonemi/ID per sherpa-onnx                                  |     ❌ NO     |
+| `espeak-ng-data.zip`    | Dati espeak-ng (fonemizzatore italiano)                          |     ❌ NO     |
 
-| File                 | Origine                                | Obbligatorio |
-| -------------------- | -------------------------------------- | :----------: |
-| `beppe.onnx`         | il tuo modello Piper                   |      ✅      |
-| `beppe.onnx.json`    | il tuo file di config Piper            |      ✅      |
-| `tokens.txt`         | generato da Piper / sherpa-onnx        |      ✅      |
-| `espeak-ng-data/`    | cartella fonemi (sherpa-onnx)          |      ✅      |
+## Per usare la TUA voce
 
-> Se non hai `tokens.txt` o `espeak-ng-data/` insieme al tuo `beppe.onnx`,
-> li puoi prendere da qualsiasi pacchetto modello Piper italiano già pronto
-> per sherpa-onnx (es. https://k2-fsa.github.io/sherpa/onnx/tts/all/).
-> Sostituisci poi solo i due file `.onnx` e `.onnx.json` con i tuoi.
-
-## Procedura completa (3 passi)
+**Sostituisci solo i 2 file marcati ✅:**
 
 ```bash
-# 1) Copia i file dentro questa cartella
-cp beppe.onnx beppe.onnx.json tokens.txt /app/frontend/assets/piper/
-cp -r espeak-ng-data /app/frontend/assets/piper/
+cp /tuo/percorso/beppe.onnx       /app/frontend/assets/piper/beppe.onnx
+cp /tuo/percorso/beppe.onnx.json  /app/frontend/assets/piper/beppe.onnx.json
+```
 
-# 2) Abilita il caricamento: apri src/audio/piperAssets.ts
-#    e sostituisci `export const PIPER_ASSETS = null;`
-#    con il blocco `export const PIPER_ASSETS = { ... }` (commentato sotto).
-
-# 3) Genera progetti nativi e installa
+Poi build:
+```bash
 cd /app/frontend
 npx expo prebuild --clean
-npx expo run:android        # su computer con Android Studio
+npx expo run:android
 # oppure
 npx eas build --platform android --profile preview
 ```
 
-L'APK conterrà `beppe.onnx` e tutto il resto. Al primo avvio l'app copia
-i file nella cartella documents dell'app e inizializza Piper. Da quel
-momento la lettura è **istantanea, real-time, completamente offline**.
+Fine. Il codice TypeScript non va toccato. `tokens.txt` ed `espeak-ng-data.zip`
+sono compatibili con qualsiasi voce Piper italiana che usi i fonemi espeak-ng `it`
+(cioè tutte le voci italiane standard generate con il training Piper ufficiale).
+
+## Se la tua voce NON è italiana
+
+Sostituisci anche `tokens.txt` ed `espeak-ng-data.zip` con quelli del pacchetto
+sherpa-onnx della voce che usi (es. `vits-piper-en_US-ryan-medium`).
+Scaricali da https://k2-fsa.github.io/sherpa/onnx/tts/all/.

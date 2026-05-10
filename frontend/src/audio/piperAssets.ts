@@ -1,38 +1,17 @@
-// ─────────────────────────────────────────────────────────────────────
-// PIPER MODEL ASSETS — EDIT THIS FILE WHEN YOU ADD YOUR MODEL.
+// Tutti gli asset Piper sono PRE-BUNDLATI nel repo.
 //
-// 1) Drop your files into /app/frontend/assets/piper/:
-//      - beppe.onnx
-//      - beppe.onnx.json
-//      - tokens.txt              (required by sherpa-onnx)
-//      - espeak-ng-data/         (folder, required by sherpa-onnx)
+// L'utente sostituisce SOLO due file con i propri:
+//   /app/frontend/assets/piper/beppe.onnx
+//   /app/frontend/assets/piper/beppe.onnx.json
 //
-// 2) Uncomment the require() lines below to bundle them into the APK/IPA.
-//
-// 3) Build native projects:
-//      cd /app/frontend
-//      npx expo prebuild --clean
-//      npx expo run:android      (or eas build --platform android)
-//
-// While these requires are commented out, the app runs in "preview" mode
-// with the device fallback TTS. That keeps Expo Go working for UI testing.
-// ─────────────────────────────────────────────────────────────────────
+// Gli altri due (tokens.txt + espeak-ng-data.zip) restano quelli del pacchetto
+// Italian Piper di sherpa-onnx, NON vanno modificati. Funzionano per qualsiasi
+// voce Piper italiana che usi gli stessi fonemi espeak-ng (it).
+export const PIPER_ASSETS = {
+  model: require('../../assets/piper/beppe.onnx'),
+  config: require('../../assets/piper/beppe.onnx.json'),
+  tokens: require('../../assets/piper/tokens.txt'),
+  espeakZip: require('../../assets/piper/espeak-ng-data.zip'),
+} as const;
 
-export type PiperAssets = {
-  model: number;
-  config: number;
-  tokens: number;
-};
-
-export const PIPER_ASSETS: PiperAssets | null = null;
-
-// ▼▼▼ TO ENABLE PIPER ON-DEVICE: replace `null` above with the export below ▼▼▼
-//
-// export const PIPER_ASSETS: PiperAssets = {
-//   model:  require('../../assets/piper/beppe.onnx'),
-//   config: require('../../assets/piper/beppe.onnx.json'),
-//   tokens: require('../../assets/piper/tokens.txt'),
-// };
-//
-// The espeak-ng-data folder is bundled automatically by the
-// `sherpa-onnx-piper-plugin` config plugin (see app.json / plugins/).
+export type PiperAssetIds = typeof PIPER_ASSETS;
