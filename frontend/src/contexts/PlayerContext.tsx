@@ -10,7 +10,7 @@
 import * as Speech from 'expo-speech';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { api, BookFull } from '../api/client';
-import { initEngine, isPiperReady, speakSentence as piperSpeak, stopSpeak as piperStop } from '../audio/piperEngine';
+import { initEngine, isPiperReady, speakSentence as piperSpeak, stopSpeak as piperStop, getPiperDiagnostics } from '../audio/piperEngine';
 
 type State = {
   bookId: string | null;
@@ -20,6 +20,8 @@ type State = {
   isPlaying: boolean;
   lengthScale: number;
   engine: 'piper' | 'device' | 'unknown';
+  piperError: string | null;
+  piperStep: string;
 };
 
 type Ctx = State & {
@@ -43,6 +45,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [lengthScale, setLengthScale] = useState(1.0);
   const [engine, setEngine] = useState<'piper' | 'device' | 'unknown'>('unknown');
+  const [piperError, setPiperError] = useState<string | null>(null);
+  const [piperStep, setPiperStep] = useState<string>('idle');
 
   const indexRef = useRef(index);
   const sentencesRef = useRef(sentences);
@@ -59,7 +63,12 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   // Initialize Piper once at provider mount; if not available we use device TTS.
   useEffect(() => {
-    initEngine().then((ok) => setEngine(ok ? 'piper' : 'device'));
+    initEngine().then((ok) => {
+      setEngine(ok ? 'piper' : 'device');
+      const diag = getPiperDiagnostics();
+      setPiperError(diag.lastError);
+      setPiperStep(diag.lastStep);
+    });
   }, []);
 
   const queueSave = useCallback((idx: number) => {
@@ -201,9 +210,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => () => { stopAll(); }, [stopAll]);
 
   const value = useMemo<Ctx>(() => ({
-    bookId, title, sentences, index, isPlaying, lengthScale, engine,
+    bookId, title, sentences, index, isPlaying, lengthScale, engine, piperError, piperStep,
     load, play, pause, toggle, jump, goTo, setLengthScale: updateLengthScale, stop,
-  }), [bookId, title, sentences, index, isPlaying, lengthScale, engine, load, play, pause, toggle, jump, goTo, updateLengthScale, stop]);
+  }), [bookId, title, sentences, index, isPlaying, lengthScale, engine, piperError, piperStep, load, play, pause, toggle, jump, goTo, updateLengthScale, stop]);
 
   return <PlayerContext.Provider value={value}>{children}</PlayerContext.Provider>;
 }

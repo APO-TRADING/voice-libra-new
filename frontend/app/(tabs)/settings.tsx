@@ -8,7 +8,7 @@ import { useTheme } from '../../src/contexts/ThemeContext';
 export default function SettingsScreen() {
   const { colors, mode, toggleMode, viewMode, setViewMode, defaultLengthScale, setDefaultLengthScale } = useTheme();
   const insets = useSafeAreaInsets();
-  const { engine } = usePlayer();
+  const { engine, piperError, piperStep } = usePlayer();
 
   const piperReady = engine === 'piper';
 
@@ -94,12 +94,14 @@ export default function SettingsScreen() {
           </View>
           <View style={{ flex: 1 }}>
             <Text style={[styles.rowTitle, { color: colors.textPrimary }]} testID="tts-status-label">
-              {piperReady ? 'Piper on-device attivo' : 'TTS dispositivo (anteprima Expo Go)'}
+              {piperReady ? 'Piper on-device attivo' : 'TTS dispositivo (fallback)'}
             </Text>
             <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>
               {piperReady
                 ? 'Inferenza locale tramite sherpa-onnx + beppe.onnx. Nessun server, nessuna connessione richiesta.'
-                : 'Aggiungi beppe.onnx, beppe.onnx.json, tokens.txt in frontend/assets/piper/, abilita PIPER_ASSETS in src/audio/piperAssets.ts e fai build con `npx expo run:android`.'}
+                : piperError
+                  ? `Errore inizializzazione (${piperStep}): ${piperError}`
+                  : 'Sto inizializzando il motore Piper, attendi...'}
             </Text>
           </View>
         </View>
