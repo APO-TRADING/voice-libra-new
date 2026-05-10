@@ -82,3 +82,12 @@ memory/test_credentials.md
 android-sdk/frontend/node_modules/react-native-sherpa-onnx-offline-tts/build-ios/ios-onnxruntime/1.17.1/onnxruntime.xcframework/ios-arm64_x86_64-simulator/onnxruntime.a
 frontend/node_modules/react-native-sherpa-onnx-offline-tts/build-ios/ios-onnxruntime/1.17.1/onnxruntime.xcframework/macos-arm64_x86_64/onnxruntime.a
 frontend/node_modules/react-native-sherpa-onnx-offline-tts/build-ios/ios-onnxruntime/1.17.1/onnxruntime.xcframework/ios-arm64_x86_64-simulator/onnxruntime.a
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
