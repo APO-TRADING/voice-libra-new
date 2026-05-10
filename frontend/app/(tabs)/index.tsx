@@ -1,6 +1,6 @@
 import { router, useFocusEffect } from 'expo-router';
 import { Grid3x3, List, MoreVertical, Play, RefreshCcw } from 'lucide-react-native';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -36,7 +36,7 @@ export default function Library() {
   const { colors, viewMode, setViewMode } = useTheme();
   const insets = useSafeAreaInsets();
   const [books, setBooks] = useState<BookSummary[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
@@ -44,12 +44,16 @@ export default function Library() {
       const list = await api.listBooks();
       setBooks(list);
     } catch (e) {
-      console.warn('list books failed', e);
+      console.warn('[Library] load failed:', e);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 

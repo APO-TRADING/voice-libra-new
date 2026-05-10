@@ -11,6 +11,13 @@ const extra = ['onnx', 'zip', 'bin', 'txt'];
 config.resolver.assetExts = Array.from(new Set([...(config.resolver.assetExts || []), ...extra]));
 config.resolver.sourceExts = (config.resolver.sourceExts || []).filter((e) => !extra.includes(e));
 
+// Stub `canvas` (Node native package required by pdfjs-dist for rendering).
+// We only need text extraction so an empty module is sufficient.
+config.resolver.extraNodeModules = {
+  ...(config.resolver.extraNodeModules || {}),
+  canvas: require('path').resolve(__dirname, 'src/audio/canvas-stub.js'),
+};
+
 // Use a stable on-disk store (shared across web/android)
 const root = process.env.METRO_CACHE_ROOT || path.join(__dirname, '.metro-cache');
 config.cacheStores = [

@@ -138,11 +138,11 @@ async function extractDocx(uri: string): Promise<string> {
 
 // ─────────── PDF ───────────
 async function extractPdf(uri: string): Promise<string> {
-  // Dynamic import keeps the heavy pdfjs out of the initial bundle when unused.
+  // pdfjs-dist 3.x CJS build (no import.meta, RN/Hermes friendly).
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const pdfjsLib: any = require('pdfjs-dist/legacy/build/pdf.mjs');
-  // Disable worker (RN has no Worker API by default)
-  pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+  const pdfjsLib: any = require('pdfjs-dist/legacy/build/pdf.js');
+  // Disable worker (RN has no Worker API)
+  if (pdfjsLib.GlobalWorkerOptions) pdfjsLib.GlobalWorkerOptions.workerSrc = '';
   const data = await readBase64(uri);
   const doc = await pdfjsLib.getDocument({
     data,
