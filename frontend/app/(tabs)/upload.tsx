@@ -38,7 +38,13 @@ export default function UploadScreen() {
 
   const pickFile = async () => {
     const res = await DocumentPicker.getDocumentAsync({
-      type: ['text/plain', '*/*'],
+      type: [
+        'text/plain',
+        'application/pdf',
+        'application/epub+zip',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        '*/*',
+      ],
       copyToCacheDirectory: true,
       multiple: false,
     });
@@ -104,7 +110,7 @@ export default function UploadScreen() {
       >
         <Text style={[styles.title, { color: colors.textPrimary }]}>Carica</Text>
         <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
-          File .txt (UTF-8). Per PDF/EPUB/DOCX, convertili prima con lo script Python incluso (scripts/text-converter-cleaner-v5.py).
+          PDF, EPUB, DOCX o TXT — estrazione e pulizia tutto offline sul dispositivo.
         </Text>
 
         <TouchableOpacity
@@ -120,7 +126,7 @@ export default function UploadScreen() {
             {file ? file.name : 'Tocca per selezionare un file'}
           </Text>
           <Text style={[styles.dropMeta, { color: colors.textSecondary }]}>
-            {file ? `${((file.size || 0) / 1024).toFixed(0)} KB` : 'Solo .txt (offline)'}
+            {file ? `${((file.size || 0) / 1024).toFixed(0)} KB` : '.pdf .epub .docx .txt (offline)'}
           </Text>
         </TouchableOpacity>
 
