@@ -39,10 +39,10 @@ function stripHtmlTags(html: string): string {
 
 async function readBase64(uri: string): Promise<Uint8Array> {
   const b64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
-  const bin = globalThis.atob ? globalThis.atob(b64) : Buffer.from(b64, 'base64').toString('binary');
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+  // Buffer.from(base64) is ~3-4x faster than atob+charCodeAt loop and keeps
+  // peak memory low (no extra intermediate binary-string allocation).
+  const buf = Buffer.from(b64, 'base64');
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 }
 
 function bytesToText(bytes: Uint8Array): string {
@@ -138,49 +138,125 @@ async function extractDocx(uri: string): Promise<string> {
 }
 
 // ─────────── PDF ───────────
-async function extractPdf(uri: string): Promise<string> {
-  // pdfjs-dist 3.x CJS build (no import.meta, RN/Hermes friendly).
+// Hermes (RN's JS engine) is missing several globals that pdfjs-dist 3.x
+// touches at module-load time (or in defensive code paths). We polyfill them
+// once, lazily, before requiring pdf.js — otherwise loading the module itself
+// can throw a hard error or even crash the JS context.
+let _pdfjsLoaded: any = null;
+function loadPdfjs(): any {
+  if (_pdfjsLoaded) return _pdfjsLoaded;
+  const g: any = globalThis as any;
+  // structuredClone — used by pdfjs internals (33+ references in 3.11).
+  if (typeof g.structuredClone !== 'function') {
+    g.structuredClone = (val: any) => {
+      try { return JSON.parse(JSON.stringify(val)); } catch { return val; }
+    };
+  }
+  // AggregateError — referenced by pdfjs error wrappers; provide a minimal stub.
+  if (typeof g.AggregateError !== 'function') {
+    g.AggregateError = class AggregateError extends Error {
+      errors: any[];
+      constructor(errors: any[] = [], message = '') {
+        super(message);
+        this.name = 'AggregateError';
+        this.errors = Array.from(errors || []);
+      }
+    };
+  }
+  // Promise.withResolvers — used by some newer pdfjs code paths.
+  if (typeof (Promise as any).withResolvers !== 'function') {
+    (Promise as any).withResolvers = function () {
+      let resolve: any, reject: any;
+      const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+      return { promise, resolve, reject };
+    };
+  }
+  // DOMMatrix / Path2D — only needed for canvas rendering. Provide opaque
+  // no-op stubs so any internal feature-detect doesn't blow up.
+  if (typeof g.DOMMatrix === 'undefined') g.DOMMatrix = function () { /* stub */ };
+  if (typeof g.Path2D === 'undefined') g.Path2D = function () { /* stub */ };
+
+  // pdfjs-dist 3.x CJS build (no import.meta — RN/Hermes friendly).
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const pdfjsLib: any = require('pdfjs-dist/legacy/build/pdf.js');
-  // Disable worker (RN has no Worker API)
-  if (pdfjsLib.GlobalWorkerOptions) pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+  _pdfjsLoaded = require('pdfjs-dist/legacy/build/pdf.js');
+  if (_pdfjsLoaded.GlobalWorkerOptions) _pdfjsLoaded.GlobalWorkerOptions.workerSrc = '';
+  return _pdfjsLoaded;
+}
+
+async function extractPdf(uri: string): Promise<string> {
+  // Refuse pathologically huge files up-front (would OOM the JS heap).
+  let fileSize = 0;
+  try {
+    const info = await FileSystem.getInfoAsync(uri, { size: true } as any);
+    fileSize = (info as any)?.size || 0;
+  } catch { /* best-effort */ }
+  if (fileSize > 80 * 1024 * 1024) {
+    throw new Error(`PDF troppo grande (${(fileSize / 1024 / 1024).toFixed(1)} MB). Limite 80 MB.`);
+  }
+
+  const pdfjsLib = loadPdfjs();
   const data = await readBase64(uri);
-  const doc = await pdfjsLib.getDocument({
-    data,
-    disableWorker: true,
-    disableFontFace: true,
-    isEvalSupported: false,
-    useSystemFonts: false,
-  }).promise;
+
+  let doc: any;
+  try {
+    doc = await pdfjsLib.getDocument({
+      data,
+      disableWorker: true,
+      disableFontFace: true,
+      isEvalSupported: false,
+      useSystemFonts: false,
+      stopAtErrors: false,
+      verbosity: 0,
+    }).promise;
+  } catch (e: any) {
+    throw new Error(`Apertura PDF fallita: ${e?.message || String(e)}`);
+  }
 
   const pages: string[] = [];
-  for (let i = 1; i <= doc.numPages; i++) {
-    const page = await doc.getPage(i);
-    const content = await page.getTextContent();
-    // Reconstruct text preserving line/paragraph breaks based on Y positions.
-    let lastY: number | null = null;
-    let line = '';
-    const lines: string[] = [];
-    for (const item of content.items as any[]) {
-      const str: string = item.str || '';
-      const y: number | undefined = item.transform?.[5];
-      if (lastY !== null && y !== undefined && Math.abs(y - lastY) > 2) {
-        lines.push(line.trimEnd());
-        line = '';
+  const totalPages = doc.numPages || 0;
+  for (let i = 1; i <= totalPages; i++) {
+    let page: any = null;
+    try {
+      page = await doc.getPage(i);
+      const content = await page.getTextContent({ disableCombineTextItems: false });
+      // Reconstruct text preserving line/paragraph breaks based on Y positions.
+      let lastY: number | null = null;
+      let line = '';
+      const lines: string[] = [];
+      for (const item of (content?.items || []) as any[]) {
+        const str: string = item?.str ?? '';
+        const y: number | undefined = item?.transform?.[5];
+        if (lastY !== null && y !== undefined && Math.abs(y - lastY) > 2) {
+          if (line) lines.push(line.trimEnd());
+          line = '';
+        }
+        line += str;
+        if (item?.hasEOL) {
+          lines.push(line.trimEnd());
+          line = '';
+        }
+        if (y !== undefined) lastY = y;
       }
-      line += str;
-      if (item.hasEOL) {
-        lines.push(line.trimEnd());
-        line = '';
-      }
-      if (y !== undefined) lastY = y;
+      if (line) lines.push(line.trimEnd());
+      pages.push(lines.join('\n'));
+    } catch (e: any) {
+      // Skip pages we can't decode (e.g. scanned/encrypted), don't crash the whole upload.
+      console.warn(`[extractPdf] page ${i} failed:`, e?.message || e);
+      pages.push('');
+    } finally {
+      try { page?.cleanup?.(); } catch { /* ignore */ }
     }
-    if (line) lines.push(line.trimEnd());
-    pages.push(lines.join('\n'));
-    try { page.cleanup(); } catch { /* ignore */ }
+    // Yield to the event loop every 5 pages so the UI thread doesn't ANR.
+    if (i % 5 === 0) await new Promise<void>((r) => setTimeout(r, 0));
   }
   try { await doc.cleanup(); } catch { /* ignore */ }
-  return pages.join('\n\n');
+  try { await doc.destroy(); } catch { /* ignore */ }
+
+  const out = pages.join('\n\n').trim();
+  if (!out) {
+    throw new Error('PDF senza testo estraibile (probabilmente è una scansione di immagini).');
+  }
+  return out;
 }
 
 // ─────────── dispatcher ───────────
