@@ -249,18 +249,32 @@ export function isPiperReady(): boolean {
 
 export async function speakSentence(text: string, lengthScale: number): Promise<void> {
   const tts = getSherpaTTS();
-  if (!tts || !ready) throw new Error('Piper not available');
+  if (!tts || !ready) {
+    await trace('speak-skip', 'Piper not available');
+    throw new Error('Piper not available');
+  }
   const speed = Math.max(0.5, Math.min(2.0, 1 / lengthScale));
-  await tts.generateAndPlay(text, 0, speed);
+  // Truncate preview & strip newlines so the trace log stays single-line.
+  const preview = text.slice(0, 80).replace(/\s+/g, ' ');
+  try {
+    await trace('speak-start', `len=${text.length} speed=${speed.toFixed(2)} preview="${preview}"`);
+    await tts.generateAndPlay(text, 0, speed);
+    await trace('speak-end', 'OK');
+  } catch (e: any) {
+    await trace('speak-error', `${e?.message || String(e)}`);
+    throw e;
+  }
 }
 
 export async function stopSpeak(): Promise<void> {
   const tts = getSherpaTTS();
   if (!tts) return;
   try {
+    await trace('stop-call', 'deinitialize');
     await tts.deinitialize();
-  } catch {
-    /* ignore */
+    await trace('stop-call', 'OK');
+  } catch (e: any) {
+    await trace('stop-call', `err: ${e?.message || e}`);
   }
   ready = false;
   initPromise = null;
