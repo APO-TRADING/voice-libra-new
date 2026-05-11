@@ -138,6 +138,25 @@ async function extractDocx(uri: string): Promise<string> {
 }
 
 // ─────────── PDF ───────────
+// Strategy:
+//   1) Prefer the **native** extractor (expo-pdf-text-extract → PDFBox on
+//      Android, PDFKit on iOS). Robust, memory-efficient, no Hermes pitfalls.
+//   2) Fallback to pdfjs-dist (pure JS) only when the native module is
+//      unavailable (Expo Go preview / web) — and only with full polyfills.
+
+async function extractPdfNative(uri: string): Promise<string | null> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mod: any = require('expo-pdf-text-extract');
+    if (!mod?.isAvailable?.()) return null;
+    const text: string = await mod.extractText(uri);
+    return text || '';
+  } catch (e: any) {
+    console.warn('[extractPdf] native extractor failed:', e?.message || e);
+    return null;
+  }
+}
+
 // Hermes (RN's JS engine) is missing several globals that pdfjs-dist 3.x
 // touches at module-load time (or in defensive code paths). We polyfill them
 // once, lazily, before requiring pdf.js — otherwise loading the module itself
@@ -183,20 +202,9 @@ function loadPdfjs(): any {
   return _pdfjsLoaded;
 }
 
-async function extractPdf(uri: string): Promise<string> {
-  // Refuse pathologically huge files up-front (would OOM the JS heap).
-  let fileSize = 0;
-  try {
-    const info = await FileSystem.getInfoAsync(uri, { size: true } as any);
-    fileSize = (info as any)?.size || 0;
-  } catch { /* best-effort */ }
-  if (fileSize > 80 * 1024 * 1024) {
-    throw new Error(`PDF troppo grande (${(fileSize / 1024 / 1024).toFixed(1)} MB). Limite 80 MB.`);
-  }
-
+async function extractPdfJs(uri: string): Promise<string> {
   const pdfjsLib = loadPdfjs();
   const data = await readBase64(uri);
-
   let doc: any;
   try {
     doc = await pdfjsLib.getDocument({
@@ -211,7 +219,6 @@ async function extractPdf(uri: string): Promise<string> {
   } catch (e: any) {
     throw new Error(`Apertura PDF fallita: ${e?.message || String(e)}`);
   }
-
   const pages: string[] = [];
   const totalPages = doc.numPages || 0;
   for (let i = 1; i <= totalPages; i++) {
@@ -219,7 +226,6 @@ async function extractPdf(uri: string): Promise<string> {
     try {
       page = await doc.getPage(i);
       const content = await page.getTextContent({ disableCombineTextItems: false });
-      // Reconstruct text preserving line/paragraph breaks based on Y positions.
       let lastY: number | null = null;
       let line = '';
       const lines: string[] = [];
@@ -240,19 +246,48 @@ async function extractPdf(uri: string): Promise<string> {
       if (line) lines.push(line.trimEnd());
       pages.push(lines.join('\n'));
     } catch (e: any) {
-      // Skip pages we can't decode (e.g. scanned/encrypted), don't crash the whole upload.
-      console.warn(`[extractPdf] page ${i} failed:`, e?.message || e);
+      console.warn(`[extractPdfJs] page ${i} failed:`, e?.message || e);
       pages.push('');
     } finally {
       try { page?.cleanup?.(); } catch { /* ignore */ }
     }
-    // Yield to the event loop every 5 pages so the UI thread doesn't ANR.
     if (i % 5 === 0) await new Promise<void>((r) => setTimeout(r, 0));
   }
   try { await doc.cleanup(); } catch { /* ignore */ }
   try { await doc.destroy(); } catch { /* ignore */ }
+  return pages.join('\n\n').trim();
+}
 
-  const out = pages.join('\n\n').trim();
+async function extractPdf(uri: string): Promise<string> {
+  // Pre-flight: refuse pathologically huge files to protect low-RAM devices.
+  let fileSize = 0;
+  try {
+    const info = await FileSystem.getInfoAsync(uri, { size: true } as any);
+    fileSize = (info as any)?.size || 0;
+  } catch { /* best-effort */ }
+  if (fileSize > 150 * 1024 * 1024) {
+    throw new Error(`PDF troppo grande (${(fileSize / 1024 / 1024).toFixed(1)} MB). Limite 150 MB.`);
+  }
+
+  // 1) Native path (PDFBox / PDFKit) — preferred.
+  const native = await extractPdfNative(uri);
+  if (native !== null) {
+    const trimmed = native.trim();
+    if (!trimmed) {
+      throw new Error('PDF senza testo estraibile (probabilmente è una scansione di immagini).');
+    }
+    return trimmed;
+  }
+
+  // 2) JS fallback (only when native module is unavailable — e.g. Expo Go).
+  //    Apply a stricter size guard here because pdfjs is far more memory-hungry.
+  if (fileSize > 40 * 1024 * 1024) {
+    throw new Error(
+      `PDF da ${(fileSize / 1024 / 1024).toFixed(1)} MB richiede il motore nativo (build EAS). ` +
+      `In anteprima Expo Go il limite è 40 MB.`,
+    );
+  }
+  const out = await extractPdfJs(uri);
   if (!out) {
     throw new Error('PDF senza testo estraibile (probabilmente è una scansione di immagini).');
   }

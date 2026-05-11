@@ -122,27 +122,52 @@ export async function initEngine(): Promise<boolean> {
       const tokensPath = stripFilePrefix(tokensPathU);
       const dataDirPath = stripFilePrefix(dataDirPathU);
 
+      // Sanity-check the actual files on disk before handing them to the
+      // native module. JNI/Kotlin will hard-crash the app if any path is
+      // missing or empty — we want a clean JS error instead.
+      const modelInfo = await FileSystem.getInfoAsync(modelPathU, { size: true } as any);
+      const tokensInfo = await FileSystem.getInfoAsync(tokensPathU, { size: true } as any);
+      const dataDirInfo = await FileSystem.getInfoAsync(dataDirPathU);
+      if (!modelInfo.exists || !(modelInfo as any).size) {
+        throw new Error(`modello mancante: ${modelPath}`);
+      }
+      if (!tokensInfo.exists || !(tokensInfo as any).size) {
+        throw new Error(`tokens.txt mancante: ${tokensPath}`);
+      }
+      if (!dataDirInfo.exists || !dataDirInfo.isDirectory) {
+        throw new Error(`espeak-ng-data mancante: ${dataDirPath}`);
+      }
+
       lastStep = 'init-sherpa';
       const tts = getSherpaTTS()!;
+      // The native module (react-native-sherpa-onnx-offline-tts 0.2.x) expects
+      // a FLAT JSON with exactly these three keys — see android Kotlin source:
+      //   val modelPath = jsonObject.getString("modelPath")
+      //   val tokensPath = jsonObject.getString("tokensPath")
+      //   val dataDirPath = jsonObject.getString("dataDirPath")
+      // Anything else (nested OfflineTtsConfig like the C++/Python API uses)
+      // makes JSONObject.getString throw and hard-crashes the JVM bridge.
       const cfg = {
-        model: {
-          vits: {
-            model: modelPath,
-            tokens: tokensPath,
-            dataDir: dataDirPath,
-            lengthScale: 1.0,
-            noiseScale: 0.667,
-            noiseScaleW: 0.8,
-          },
-          debug: 0,
-          provider: 'cpu',
-          numThreads: 2,
-        },
-        ruleFsts: '',
-        ruleFars: '',
-        maxNumSentences: 1,
+        modelPath,
+        tokensPath,
+        dataDirPath,
       };
-      await tts.initialize(JSON.stringify(cfg));
+      // initialize() is a @ReactMethod with no Promise param on Android, so
+      // it returns synchronously. We still wrap in a try/catch + Promise so
+      // a JNI-side throw is surfaced as a JS error instead of an app crash.
+      await new Promise<void>((resolve, reject) => {
+        try {
+          const ret: any = tts.initialize(JSON.stringify(cfg));
+          if (ret && typeof ret.then === 'function') {
+            ret.then(() => resolve(), (err: any) => reject(err));
+          } else {
+            // Give native ~50ms to throw if it's going to — otherwise resolve.
+            setTimeout(() => resolve(), 50);
+          }
+        } catch (err) {
+          reject(err);
+        }
+      });
       ready = true;
       lastStep = 'ready';
       lastError = null;
