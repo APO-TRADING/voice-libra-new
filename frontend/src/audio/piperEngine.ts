@@ -13,10 +13,19 @@
 import { Asset } from 'expo-asset';
 import * as FileSystem from 'expo-file-system/legacy';
 import { unzipSync } from 'fflate';
-import { Platform } from 'react-native';
+import { NativeModules, Platform } from 'react-native';
 import { Buffer } from 'buffer';
 import { PIPER_ASSETS } from './piperAssets';
 import { getSherpaTTS, isPiperAvailable } from './sherpaPiper';
+
+// Sample rate of the bundled Piper model. Read from the .onnx metadata via
+// `python -c "import onnx; ..."` once at build time. MUST match the value
+// the python script injected (key `sample_rate`). The wrapper JS hardcodes
+// 22050 in its `initialize()` shim, so we sidestep it and call the underlying
+// @ReactMethod `initializeTTS(sampleRate, channels, modelId)` directly with
+// the correct rate — otherwise Android's AudioTrack plays at 22050 and a
+// 16000 Hz model comes out ~1.38× too fast / pitched up.
+const PIPER_SAMPLE_RATE = 16000;
 
 let initPromise: Promise<boolean> | null = null;
 let ready = false;
@@ -155,9 +164,22 @@ export async function initEngine(): Promise<boolean> {
       // initialize() is a @ReactMethod with no Promise param on Android, so
       // it returns synchronously. We still wrap in a try/catch + Promise so
       // a JNI-side throw is surfaced as a JS error instead of an app crash.
+      //
+      // NOTE: the wrapper's `TTSManager.initialize(json)` hardcodes 22050 Hz
+      // before forwarding to the native `initializeTTS(sampleRate, channels,
+      // modelId)`. We call the native bridge directly so AudioTrack uses the
+      // ACTUAL sample rate of beppe.onnx (PIPER_SAMPLE_RATE).
       await new Promise<void>((resolve, reject) => {
         try {
-          const ret: any = tts.initialize(JSON.stringify(cfg));
+          const native: any = (NativeModules as any).TTSManager;
+          let ret: any;
+          if (native && typeof native.initializeTTS === 'function') {
+            // Direct call — bypasses the wrapper's 22050 default.
+            ret = native.initializeTTS(PIPER_SAMPLE_RATE, 1, JSON.stringify(cfg));
+          } else {
+            // Fallback to JS wrapper (only path on iOS or older module builds).
+            ret = (tts as any).initialize(JSON.stringify(cfg));
+          }
           if (ret && typeof ret.then === 'function') {
             ret.then(() => resolve(), (err: any) => reject(err));
           } else {
