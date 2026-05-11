@@ -242,10 +242,6 @@ export async function initEngine(): Promise<boolean> {
   })();
   return initPromise;
 }
-    }
-  })();
-  return initPromise;
-}
 
 export function isPiperReady(): boolean {
   return ready;
