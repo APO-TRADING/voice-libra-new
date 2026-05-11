@@ -31,6 +31,41 @@ let lastError: string | null = null;
 let lastStep: string = 'idle';
 
 const DEST_DIR = `${FileSystem.documentDirectory}piper`;
+const TRACE_FILE = `${FileSystem.documentDirectory}piper-trace.log`;
+
+// Crash-resilient logger: writes every step to disk so that, even if the
+// process is killed by a native JNI fault, the next launch can show the user
+// EXACTLY where the previous run died (no logcat needed).
+async function trace(step: string, info: string = ''): Promise<void> {
+  lastStep = step;
+  const line = `[${new Date().toISOString()}] ${step}${info ? ' :: ' + info : ''}\n`;
+  // Best-effort, never throws.
+  try {
+    const existing = (await FileSystem.getInfoAsync(TRACE_FILE)).exists
+      ? await FileSystem.readAsStringAsync(TRACE_FILE)
+      : '';
+    // Keep file from growing unbounded (cap ~50 KB).
+    const truncated = existing.length > 50_000 ? existing.slice(-25_000) : existing;
+    await FileSystem.writeAsStringAsync(TRACE_FILE, truncated + line);
+  } catch {
+    /* ignore — disk may be full or perms denied */
+  }
+  console.log(`[Piper trace] ${line.trim()}`);
+}
+
+export async function readPiperTrace(): Promise<string> {
+  try {
+    const info = await FileSystem.getInfoAsync(TRACE_FILE);
+    if (!info.exists) return '(nessun trace registrato)';
+    return await FileSystem.readAsStringAsync(TRACE_FILE);
+  } catch (e: any) {
+    return `(impossibile leggere trace: ${e?.message || e})`;
+  }
+}
+
+export async function clearPiperTrace(): Promise<void> {
+  try { await FileSystem.deleteAsync(TRACE_FILE, { idempotent: true }); } catch { /* ignore */ }
+}
 
 export function getPiperDiagnostics() {
   return { ready, lastError, lastStep, available: isPiperAvailable() };
@@ -109,64 +144,70 @@ function stripFilePrefix(p: string): string {
 export async function initEngine(): Promise<boolean> {
   if (initPromise) return initPromise;
   initPromise = (async () => {
-    lastStep = 'check-native';
+    await trace('start', `sample_rate=${PIPER_SAMPLE_RATE}`);
     if (!isPiperAvailable()) {
       lastError = 'Modulo nativo Sherpa non disponibile (anteprima Expo Go)';
+      await trace('check-native', 'FAIL: TTSManager non in NativeModules');
       return false;
     }
+    await trace('check-native', 'OK');
     try {
-      lastStep = 'mkdir';
+      await trace('mkdir', `path=${DEST_DIR}`);
       await ensureDir(DEST_DIR);
+      await trace('mkdir', 'OK');
 
-      lastStep = 'copy-model';
+      await trace('copy-model', 'inizio');
       const modelPathU = await copyAsset(PIPER_ASSETS.model, 'beppe.onnx');
-      lastStep = 'copy-tokens';
+      const modelStat = await FileSystem.getInfoAsync(modelPathU, { size: true } as any);
+      await trace('copy-model', `OK size=${(modelStat as any).size || 0} path=${modelPathU}`);
+
+      await trace('copy-tokens', 'inizio');
       const tokensPathU = await copyAsset(PIPER_ASSETS.tokens, 'tokens.txt');
-      lastStep = 'unzip-espeak';
+      const tokensStat = await FileSystem.getInfoAsync(tokensPathU, { size: true } as any);
+      await trace('copy-tokens', `OK size=${(tokensStat as any).size || 0} path=${tokensPathU}`);
+
+      await trace('unzip-espeak', 'inizio (può richiedere 10-30s)');
       const dataDirPathU = await unzipEspeak(PIPER_ASSETS.espeakZip);
+      const dataDirStat = await FileSystem.getInfoAsync(dataDirPathU);
+      await trace('unzip-espeak', `OK path=${dataDirPathU} isDir=${dataDirStat.isDirectory}`);
 
       const modelPath = stripFilePrefix(modelPathU);
       const tokensPath = stripFilePrefix(tokensPathU);
       const dataDirPath = stripFilePrefix(dataDirPathU);
 
-      // Sanity-check the actual files on disk before handing them to the
-      // native module. JNI/Kotlin will hard-crash the app if any path is
-      // missing or empty — we want a clean JS error instead.
-      const modelInfo = await FileSystem.getInfoAsync(modelPathU, { size: true } as any);
-      const tokensInfo = await FileSystem.getInfoAsync(tokensPathU, { size: true } as any);
-      const dataDirInfo = await FileSystem.getInfoAsync(dataDirPathU);
-      if (!modelInfo.exists || !(modelInfo as any).size) {
-        throw new Error(`modello mancante: ${modelPath}`);
-      }
-      if (!tokensInfo.exists || !(tokensInfo as any).size) {
-        throw new Error(`tokens.txt mancante: ${tokensPath}`);
-      }
-      if (!dataDirInfo.exists || !dataDirInfo.isDirectory) {
-        throw new Error(`espeak-ng-data mancante: ${dataDirPath}`);
+      // Read first 8 bytes of .onnx to verify it's a real ONNX file (not a
+      // placeholder/text file). ONNX is a protobuf — first byte is 0x08.
+      try {
+        const head = await FileSystem.readAsStringAsync(modelPathU, {
+          encoding: FileSystem.EncodingType.Base64, length: 16, position: 0,
+        } as any);
+        const headBytes = Array.from(Buffer.from(head, 'base64')).map(b => b.toString(16).padStart(2, '0')).join(' ');
+        await trace('onnx-magic', `first 16 bytes hex: ${headBytes}`);
+      } catch (e: any) {
+        await trace('onnx-magic', `skip (${e?.message || e})`);
       }
 
-      lastStep = 'init-sherpa';
+      await trace('sanity-check', 'verifica file');
+      if (!modelStat.exists || !(modelStat as any).size) {
+        throw new Error(`modello mancante o vuoto: ${modelPath}`);
+      }
+      if (!tokensStat.exists || !(tokensStat as any).size) {
+        throw new Error(`tokens.txt mancante o vuoto: ${tokensPath}`);
+      }
+      if (!dataDirStat.exists || !dataDirStat.isDirectory) {
+        throw new Error(`espeak-ng-data non è una directory: ${dataDirPath}`);
+      }
+      // Verify at least one espeak file exists inside the data dir.
+      const dirEntries = await FileSystem.readDirectoryAsync(dataDirPathU);
+      await trace('sanity-check', `espeak-ng-data contiene ${dirEntries.length} entries`);
+      if (dirEntries.length < 10) {
+        throw new Error(`espeak-ng-data ha solo ${dirEntries.length} file (estrazione fallita?)`);
+      }
+
+      await trace('init-sherpa', `cfg={modelPath,tokensPath,dataDirPath} sample_rate=${PIPER_SAMPLE_RATE}`);
       const tts = getSherpaTTS()!;
-      // The native module (react-native-sherpa-onnx-offline-tts 0.2.x) expects
-      // a FLAT JSON with exactly these three keys — see android Kotlin source:
-      //   val modelPath = jsonObject.getString("modelPath")
-      //   val tokensPath = jsonObject.getString("tokensPath")
-      //   val dataDirPath = jsonObject.getString("dataDirPath")
-      // Anything else (nested OfflineTtsConfig like the C++/Python API uses)
-      // makes JSONObject.getString throw and hard-crashes the JVM bridge.
-      const cfg = {
-        modelPath,
-        tokensPath,
-        dataDirPath,
-      };
-      // initialize() is a @ReactMethod with no Promise param on Android, so
-      // it returns synchronously. We still wrap in a try/catch + Promise so
-      // a JNI-side throw is surfaced as a JS error instead of an app crash.
-      //
-      // NOTE: the wrapper's `TTSManager.initialize(json)` hardcodes 22050 Hz
-      // before forwarding to the native `initializeTTS(sampleRate, channels,
-      // modelId)`. We call the native bridge directly so AudioTrack uses the
-      // ACTUAL sample rate of beppe.onnx (PIPER_SAMPLE_RATE).
+      const cfg = { modelPath, tokensPath, dataDirPath };
+
       await new Promise<void>((resolve, reject) => {
         try {
           const native: any = (NativeModules as any).TTSManager;
@@ -175,29 +216,32 @@ export async function initEngine(): Promise<boolean> {
             // Direct call — bypasses the wrapper's 22050 default.
             ret = native.initializeTTS(PIPER_SAMPLE_RATE, 1, JSON.stringify(cfg));
           } else {
-            // Fallback to JS wrapper (only path on iOS or older module builds).
             ret = (tts as any).initialize(JSON.stringify(cfg));
           }
           if (ret && typeof ret.then === 'function') {
             ret.then(() => resolve(), (err: any) => reject(err));
           } else {
-            // Give native ~50ms to throw if it's going to — otherwise resolve.
             setTimeout(() => resolve(), 50);
           }
         } catch (err) {
           reject(err);
         }
       });
+      await trace('init-sherpa', 'OK (nessuna eccezione JNI sincrona)');
+
       ready = true;
-      lastStep = 'ready';
       lastError = null;
-      console.log('[Piper] On-device engine ready');
+      await trace('ready', 'TTS engine pronto');
       return true;
     } catch (e: any) {
       ready = false;
       lastError = `${lastStep}: ${e?.message || String(e)}`;
-      console.warn('[Piper] init failed:', lastError);
+      await trace('error', `at step=${lastStep}: ${e?.message || String(e)}`);
       return false;
+    }
+  })();
+  return initPromise;
+}
     }
   })();
   return initPromise;

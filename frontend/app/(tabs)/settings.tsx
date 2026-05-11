@@ -1,7 +1,9 @@
 import Slider from '@react-native-community/slider';
-import { Check, Cpu, Moon, Sun } from 'lucide-react-native';
-import { ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
+import { Check, Copy, Cpu, Moon, RefreshCw, Sun } from 'lucide-react-native';
+import { useCallback, useEffect, useState } from 'react';
+import { Alert, Clipboard, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { clearPiperTrace, readPiperTrace } from '../../src/audio/piperEngine';
 import { usePlayer } from '../../src/contexts/PlayerContext';
 import { useTheme } from '../../src/contexts/ThemeContext';
 
@@ -9,6 +11,23 @@ export default function SettingsScreen() {
   const { colors, mode, toggleMode, viewMode, setViewMode, defaultLengthScale, setDefaultLengthScale } = useTheme();
   const insets = useSafeAreaInsets();
   const { engine, piperError, piperStep } = usePlayer();
+  const [trace, setTrace] = useState<string>('(caricamento...)');
+
+  const refreshTrace = useCallback(async () => {
+    const t = await readPiperTrace();
+    setTrace(t || '(vuoto)');
+  }, []);
+
+  useEffect(() => { refreshTrace(); }, [refreshTrace]);
+
+  const copyTrace = () => {
+    try {
+      (Clipboard as any).setString(trace);
+      Alert.alert('Copiato', 'Trace copiato negli appunti. Incollalo nella chat.');
+    } catch {
+      Alert.alert('Trace', trace);
+    }
+  };
 
   const piperReady = engine === 'piper';
 
@@ -106,6 +125,45 @@ export default function SettingsScreen() {
                     : 'TTS dispositivo come fallback.'}
             </Text>
           </View>
+        </View>
+      </View>
+
+      <Text style={[styles.section, { color: colors.textSecondary }]}>DIAGNOSTICA PIPER</Text>
+      <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+        <View style={{ paddingVertical: 12 }}>
+          <Text style={[styles.rowMeta, { color: colors.textSecondary, marginBottom: 8 }]}>
+            Log persistente del motore TTS. Sopravvive ai crash. Apri qui dopo che l'app si chiude e copia il contenuto.
+          </Text>
+          <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
+            <TouchableOpacity
+              onPress={refreshTrace}
+              style={[styles.toggleBtn, { borderColor: colors.border, paddingHorizontal: 12, flexDirection: 'row', gap: 6 }]}
+            >
+              <RefreshCw color={colors.textPrimary} size={14} />
+              <Text style={[styles.toggleLabel, { color: colors.textPrimary }]}>Aggiorna</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={copyTrace}
+              style={[styles.toggleBtn, { borderColor: colors.border, paddingHorizontal: 12, flexDirection: 'row', gap: 6 }]}
+            >
+              <Copy color={colors.textPrimary} size={14} />
+              <Text style={[styles.toggleLabel, { color: colors.textPrimary }]}>Copia</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={async () => { await clearPiperTrace(); refreshTrace(); }}
+              style={[styles.toggleBtn, { borderColor: colors.border, paddingHorizontal: 12 }]}
+            >
+              <Text style={[styles.toggleLabel, { color: colors.textPrimary }]}>Reset</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView
+            style={{ maxHeight: 280, backgroundColor: colors.surface2, borderRadius: 8, padding: 10 }}
+            nestedScrollEnabled
+          >
+            <Text selectable style={{ color: colors.textPrimary, fontSize: 11, fontFamily: 'monospace' }}>
+              {trace}
+            </Text>
+          </ScrollView>
         </View>
       </View>
 
