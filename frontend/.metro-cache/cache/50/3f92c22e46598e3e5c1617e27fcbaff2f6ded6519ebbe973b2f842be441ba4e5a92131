@@ -1,0 +1,1 @@
+{"dependencies":[],"output":[{"data":{"code":"__d(function(global, require, _importDefaultUnused, _importAllUnused, module, exports, _dependencyMapUnused) {\n  module.exports = {\n  \"sample_rate\": 22050,\n  \"language\": \"Italian\",\n  \"voice\": \"it\",\n  \"n_speakers\": 1\n}\n;\n});","lineCount":9,"map":[[9,3]],"functionMap":null},"type":"js/module"}]}
