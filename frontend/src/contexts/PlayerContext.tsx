@@ -61,15 +61,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { lengthScaleRef.current = lengthScale; }, [lengthScale]);
   useEffect(() => { bookIdRef.current = bookId; }, [bookId]);
 
-  // Initialize Piper once at provider mount; if not available we use device TTS.
-  useEffect(() => {
-    initEngine().then((ok) => {
-      setEngine(ok ? 'piper' : 'device');
-      const diag = getPiperDiagnostics();
-      setPiperError(diag.lastError);
-      setPiperStep(diag.lastStep);
-    });
-  }, []);
+  // NOTE: do NOT call initEngine() here. We initialize Piper lazily on the
+  // first play() to keep app startup robust: if sherpa init were to crash
+  // natively with a corrupt model, doing it on every launch would brick the
+  // app. With lazy init, the user can still browse the library, upload books,
+  // change settings, etc., even if Piper fails.
 
   const queueSave = useCallback((idx: number) => {
     const id = bookIdRef.current;
@@ -144,10 +140,25 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   const play = useCallback(() => {
     if (!sentencesRef.current.length) return;
-    stopAll().then(() => {
+    // Lazy init: try Piper the first time the user presses play. If it fails,
+    // the catch path will keep the user on the device-TTS fallback so the app
+    // never crashes here.
+    stopAll().then(async () => {
+      if (engine === 'unknown') {
+        try {
+          const ok = await initEngine();
+          setEngine(ok ? 'piper' : 'device');
+          const diag = getPiperDiagnostics();
+          setPiperError(diag.lastError);
+          setPiperStep(diag.lastStep);
+        } catch (e: any) {
+          setEngine('device');
+          setPiperError(`init-exception: ${e?.message || String(e)}`);
+        }
+      }
       playLoop(indexRef.current);
     });
-  }, [playLoop, stopAll]);
+  }, [engine, playLoop, stopAll]);
 
   const pause = useCallback(() => {
     playingRef.current = false;

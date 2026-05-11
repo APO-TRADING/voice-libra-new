@@ -94,14 +94,16 @@ export default function SettingsScreen() {
           </View>
           <View style={{ flex: 1 }}>
             <Text style={[styles.rowTitle, { color: colors.textPrimary }]} testID="tts-status-label">
-              {piperReady ? 'Piper on-device attivo' : 'TTS dispositivo (fallback)'}
+              {piperReady ? 'Piper on-device attivo' : engine === 'unknown' ? 'Piper (caricamento al primo play)' : 'TTS dispositivo (fallback)'}
             </Text>
             <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>
               {piperReady
                 ? 'Inferenza locale tramite sherpa-onnx + beppe.onnx. Nessun server, nessuna connessione richiesta.'
                 : piperError
                   ? `Errore inizializzazione (${piperStep}): ${piperError}`
-                  : 'Sto inizializzando il motore Piper, attendi...'}
+                  : engine === 'unknown'
+                    ? 'Il motore Piper verrà inizializzato al primo Play. La prima inizializzazione può richiedere 10-30 secondi (estrazione fonemi).'
+                    : 'TTS dispositivo come fallback.'}
             </Text>
           </View>
         </View>

@@ -49,8 +49,19 @@ async function copyAsset(modId: number, destName: string): Promise<string> {
 
 async function unzipEspeak(modId: number): Promise<string> {
   const dataDir = `${DEST_DIR}/espeak-ng-data`;
-  const info = await FileSystem.getInfoAsync(dataDir);
-  if (info.exists && info.isDirectory) return dataDir;
+  const marker = `${DEST_DIR}/.espeak-ready`;
+
+  // Only trust the dir if the completion marker exists (avoids partial state
+  // from a previous app crash during unzip).
+  const dirInfo = await FileSystem.getInfoAsync(dataDir);
+  const markerInfo = await FileSystem.getInfoAsync(marker);
+  if (dirInfo.exists && dirInfo.isDirectory && markerInfo.exists) {
+    return dataDir;
+  }
+  // Clean up any partial extraction.
+  if (dirInfo.exists) {
+    try { await FileSystem.deleteAsync(dataDir, { idempotent: true }); } catch { /* ignore */ }
+  }
 
   const asset = Asset.fromModule(modId);
   await asset.downloadAsync();
@@ -62,6 +73,7 @@ async function unzipEspeak(modId: number): Promise<string> {
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   const entries = unzipSync(bytes);
 
+  let count = 0;
   for (const [name, data] of Object.entries(entries)) {
     const fullPath = `${DEST_DIR}/${name}`;
     if (name.endsWith('/') || data.length === 0) {
@@ -70,15 +82,16 @@ async function unzipEspeak(modId: number): Promise<string> {
     }
     const parent = fullPath.replace(/\/[^/]+$/, '');
     await ensureDir(parent);
-    let s = '';
-    const CHUNK = 0x8000;
-    for (let i = 0; i < data.length; i += CHUNK) {
-      const slice = data.subarray(i, i + CHUNK);
-      s += String.fromCharCode.apply(null, Array.from(slice));
-    }
-    const out64 = globalThis.btoa ? globalThis.btoa(s) : Buffer.from(s, 'binary').toString('base64');
+    // Buffer.from is ~10× faster than the manual fromCharCode loop and uses
+    // far less peak memory (no giant intermediate JS string).
+    const out64 = Buffer.from(data).toString('base64');
     await FileSystem.writeAsStringAsync(fullPath, out64, { encoding: FileSystem.EncodingType.Base64 });
+    count += 1;
+    // Yield to the event loop every 50 files so the UI thread doesn't ANR.
+    if (count % 50 === 0) await new Promise<void>((r) => setTimeout(r, 0));
   }
+  // Mark extraction complete so we never read a partial dir on next launch.
+  await FileSystem.writeAsStringAsync(marker, String(count), { encoding: FileSystem.EncodingType.UTF8 });
   return dataDir;
 }
 
