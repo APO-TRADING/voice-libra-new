@@ -2,6 +2,7 @@
 // All pure JavaScript — no native modules, no server.
 import * as FileSystem from 'expo-file-system/legacy';
 import { unzipSync } from 'fflate';
+import { Buffer } from 'buffer';
 
 // ─────────── helpers ───────────
 function decodeHtmlEntities(s: string): string {

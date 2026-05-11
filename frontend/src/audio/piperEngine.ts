@@ -14,6 +14,7 @@ import { Asset } from 'expo-asset';
 import * as FileSystem from 'expo-file-system/legacy';
 import { unzipSync } from 'fflate';
 import { Platform } from 'react-native';
+import { Buffer } from 'buffer';
 import { PIPER_ASSETS } from './piperAssets';
 import { getSherpaTTS, isPiperAvailable } from './sherpaPiper';
 
@@ -68,9 +69,8 @@ async function unzipEspeak(modId: number): Promise<string> {
   const src = asset.localUri || asset.uri;
   if (!src) throw new Error('espeak-ng-data.bin: localUri vuoto');
   const b64 = await FileSystem.readAsStringAsync(src, { encoding: FileSystem.EncodingType.Base64 });
-  const bin = globalThis.atob ? globalThis.atob(b64) : Buffer.from(b64, 'base64').toString('binary');
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  // Decode base64 → Uint8Array using Buffer polyfill (from 'buffer' package)
+  const bytes = new Uint8Array(Buffer.from(b64, 'base64'));
   const entries = unzipSync(bytes);
 
   let count = 0;
