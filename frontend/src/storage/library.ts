@@ -1,6 +1,14 @@
-// Local-only library storage using AsyncStorage. No backend needed.
-// All books, folders, and progress live on-device.
+// Local-only library storage.
+// - Metadata (book list, folders, progress) → AsyncStorage (small, fast)
+// - Per-book content + sentence array → JSON file on disk (no size limits).
+//
+// Why files for content?
+//   Android's AsyncStorage is backed by SQLite which has a per-row
+//   CursorWindow limit of ~2 MB. Long EPUBs (or any large novel) easily
+//   exceed that and throw "Row too big to fit into CursorWindow".
+//   Writing the body to expo-file-system bypasses the limit entirely.
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as FileSystem from 'expo-file-system/legacy';
 
 export type BookSummary = {
   id: string;
@@ -24,7 +32,18 @@ export type Folder = { id: string; name: string; created_at: string };
 
 const K_BOOKS = '@beppe.books.v1';
 const K_FOLDERS = '@beppe.folders.v1';
-const K_BOOK_CONTENT = (id: string) => `@beppe.book.${id}`;
+// Legacy key (pre-FS storage). Kept for one-shot migration on read.
+const K_BOOK_CONTENT_LEGACY = (id: string) => `@beppe.book.${id}`;
+
+const BOOKS_DIR = `${FileSystem.documentDirectory}books`;
+const bookFilePath = (id: string) => `${BOOKS_DIR}/${id}.json`;
+
+async function ensureBooksDir(): Promise<void> {
+  const info = await FileSystem.getInfoAsync(BOOKS_DIR);
+  if (!info.exists) {
+    await FileSystem.makeDirectoryAsync(BOOKS_DIR, { intermediates: true });
+  }
+}
 
 function uuid(): string {
   // RFC4122-ish v4 (cryptographic strength not required here)
@@ -72,6 +91,53 @@ function summary(b: BookSummary): BookSummary {
   };
 }
 
+async function writeBookContent(id: string, content: string, sentences: string[]): Promise<void> {
+  await ensureBooksDir();
+  await FileSystem.writeAsStringAsync(
+    bookFilePath(id),
+    JSON.stringify({ content, sentences }),
+    { encoding: FileSystem.EncodingType.UTF8 },
+  );
+}
+
+async function readBookContent(id: string): Promise<{ content: string; sentences: string[] }> {
+  // 1) Try the FS path (current default).
+  try {
+    const info = await FileSystem.getInfoAsync(bookFilePath(id));
+    if (info.exists) {
+      const raw = await FileSystem.readAsStringAsync(bookFilePath(id), {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+      return JSON.parse(raw) as { content: string; sentences: string[] };
+    }
+  } catch {
+    /* fallthrough to legacy migration */
+  }
+  // 2) Legacy fallback — content used to live in AsyncStorage. If it's still
+  //    there, migrate to FS and delete the legacy key.
+  try {
+    const legacy = await AsyncStorage.getItem(K_BOOK_CONTENT_LEGACY(id));
+    if (legacy) {
+      const parsed = JSON.parse(legacy) as { content: string; sentences: string[] };
+      try {
+        await writeBookContent(id, parsed.content, parsed.sentences);
+        await AsyncStorage.removeItem(K_BOOK_CONTENT_LEGACY(id));
+      } catch {
+        /* even if migration write fails, return the data */
+      }
+      return parsed;
+    }
+  } catch (e: any) {
+    // If AsyncStorage itself throws (e.g. CursorWindow on huge legacy rows),
+    // surface a clear error rather than a cryptic SQLite message.
+    throw new Error(
+      `Contenuto del libro non leggibile (probabilmente troppo grande dalla vecchia versione). ` +
+      `Eliminalo dalla libreria e ricaricalo. Dettagli: ${e?.message || e}`,
+    );
+  }
+  throw new Error('Contenuto libro mancante');
+}
+
 export const library = {
   async listBooks(folderId?: string): Promise<BookSummary[]> {
     const all = await loadBooks();
@@ -86,9 +152,7 @@ export const library = {
     const list = await loadBooks();
     const b = list.find((x) => x.id === id);
     if (!b) throw new Error('Libro non trovato');
-    const raw = await AsyncStorage.getItem(K_BOOK_CONTENT(id));
-    if (!raw) throw new Error('Contenuto libro mancante');
-    const { content, sentences } = JSON.parse(raw) as { content: string; sentences: string[] };
+    const { content, sentences } = await readBookContent(id);
     return { ...b, content, sentences };
   },
 
@@ -114,12 +178,11 @@ export const library = {
       created_at: now,
       updated_at: now,
     };
+    // Write content to FS first; if that fails we don't want a metadata
+    // entry pointing to non-existent content.
+    await writeBookContent(book.id, input.content, input.sentences);
     list.unshift(book);
     await saveBooks(list);
-    await AsyncStorage.setItem(
-      K_BOOK_CONTENT(book.id),
-      JSON.stringify({ content: input.content, sentences: input.sentences }),
-    );
     return summary(book);
   },
 
@@ -158,7 +221,9 @@ export const library = {
     const list = await loadBooks();
     const filtered = list.filter((b) => b.id !== id);
     await saveBooks(filtered);
-    await AsyncStorage.removeItem(K_BOOK_CONTENT(id));
+    // Clean both possible storage locations.
+    try { await FileSystem.deleteAsync(bookFilePath(id), { idempotent: true }); } catch { /* ignore */ }
+    try { await AsyncStorage.removeItem(K_BOOK_CONTENT_LEGACY(id)); } catch { /* ignore */ }
   },
 
   async listFolders(): Promise<Folder[]> {
