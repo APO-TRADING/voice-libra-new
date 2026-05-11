@@ -108,6 +108,23 @@ def main() -> int:
         print(f"     {k} = {v}")
     add_meta_data(MODEL_PATH, meta_data)
 
+    # Genera anche un piper-config.json che l'app legge a runtime per
+    # configurare l'AudioTrack col sample rate REALE del modello. Senza
+    # questo, AudioTrack userebbe il default hardcoded del wrapper (22050 Hz)
+    # e la voce uscirebbe alterata se il modello è 16000 Hz (Piper "low").
+    runtime_cfg_path = ASSETS_DIR / "piper-config.json"
+    runtime_cfg = {
+        "sample_rate": int(meta_data["sample_rate"]),
+        "language": meta_data["language"],
+        "voice": meta_data["voice"],
+        "n_speakers": int(meta_data["n_speakers"]),
+    }
+    runtime_cfg_path.write_text(
+        json.dumps(runtime_cfg, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"-> Scritto {runtime_cfg_path.name}: {runtime_cfg}")
+
     print()
     print("✓ Fatto! Adesso puoi buildare l'APK:")
     print("    cd frontend && npx expo prebuild --clean && eas build --platform android --profile preview --clear-cache")
