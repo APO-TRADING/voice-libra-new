@@ -133,7 +133,37 @@ frontend:
       - working: "NA"
         agent: "main"
         comment: |
-          v3 patch (current): ULTRA-DETAILED INSTRUMENTATION on top of v2.
+          v4 patch (current) — CRITICAL FIX after user provided trace from
+          108MB Piper "high" Italian model crash on Realme RMX5070:
+
+          ROOT CAUSE IDENTIFIED from trace:
+          1) The original initializeTTS @ReactMethod did NOT take a Promise,
+             so RN bridge fire-and-forget meant JS continued after only 37ms
+             (fixed 50ms setTimeout). Native was still in init.5d.OfflineTts.new
+             loading the 108MB model. JS then called speak("Ciao.") which
+             SIGSEGV'd the engine in a half-initialized state.
+          2) SIGSEGV is NOT a catchable Java exception. The xnnpack-first
+             provider order meant xnnpack crashed the WHOLE PROCESS, so the
+             CPU fallback never ran.
+
+          v4 FIXES applied:
+          (a) Added @ReactMethod overload `initializeTTS(sr, ch, modelId,
+              promise: Promise)` that runs full init on background Thread and
+              resolves the promise ONLY after init.8.DONE. JS now uses
+              `await new Promise(...)` with 10-minute safety timeout.
+          (b) REVERSED provider order: ["cpu", "xnnpack"]. CPU is the
+              reference implementation in onnxruntime, handles ALL ops, just
+              slower. Eliminates the unrecoverable xnnpack SIGSEGV.
+          (c) Adaptive numThreads: for models > 80MB (Piper "high"), capped
+              to 2 threads. Reduces peak memory pressure during model load.
+          (d) JS phase6 trace now shows phase6.native.resolve/reject AT THE
+              ACTUAL completion (not 37ms later).
+          (e) Kept legacy `initializeTTSLegacy(sr, ch, modelId)` for backward
+              compat.
+
+          Total patch v4: 701 lines, 3 files modified. Promise-based init,
+          CPU-first provider, model-size-aware threads, granular trace 89+.
+          Awaiting user rebuild + new trace.
           Every single sub-step of TTS init is now logged with a unique
           [native]/[audio] tag visible in the Diagnostics panel. If the JNI
           crashes, the user can pinpoint EXACTLY which Kotlin line died.

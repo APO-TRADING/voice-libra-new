@@ -280,31 +280,58 @@ export async function initEngine(): Promise<boolean> {
         await trace('phase5.WARN', 'missing canonical espeak files (phontab/phonindex)');
       }
 
-      await trace('==PHASE.6==', 'invoke native initializeTTS');
+      await trace('==PHASE.6==', 'invoke native initializeTTS (può richiedere 10-60s per modelli grandi)');
       await trace('phase6.args',
         `sr=${PIPER_SAMPLE_RATE} ch=1 modelPath=${modelPath} tokensPath=${tokensPath} dataDirPath=${dataDirPath}`);
       const tts = getSherpaTTS()!;
       const cfg = { modelPath, tokensPath, dataDirPath };
 
+      // ─── CRITICAL FIX: actually await the native promise ───────────────
+      // The patched Kotlin initializeTTS now ACCEPTS a Promise parameter
+      // and runs the heavy model load on a background thread. JS must
+      // ACTUALLY await this — otherwise we race ahead and call speak()
+      // while the engine is still loading (which causes a SIGSEGV on
+      // half-initialized state with no recovery).
       await new Promise<void>((resolve, reject) => {
-        try {
-          const native: any = (NativeModules as any).TTSManager;
-          let ret: any;
-          if (native && typeof native.initializeTTS === 'function') {
-            ret = native.initializeTTS(PIPER_SAMPLE_RATE, 1, JSON.stringify(cfg));
-          } else {
-            ret = (tts as any).initialize(JSON.stringify(cfg));
-          }
-          if (ret && typeof ret.then === 'function') {
-            ret.then(() => resolve(), (err: any) => reject(err));
-          } else {
-            setTimeout(() => resolve(), 50);
-          }
-        } catch (err) {
-          reject(err);
+        const native: any = (NativeModules as any).TTSManager;
+        if (!native || typeof native.initializeTTS !== 'function') {
+          reject(new Error('Native TTSManager.initializeTTS missing'));
+          return;
+        }
+        // 10-minute safety timeout: 108MB model can take 30-60s on slow
+        // devices, but never 10 minutes. If we hit this, native is hung.
+        const timeoutMs = 10 * 60 * 1000;
+        const timer = setTimeout(() => {
+          trace('phase6.TIMEOUT', `native init didn't complete in ${timeoutMs}ms`);
+          reject(new Error(`native init timeout after ${timeoutMs}ms`));
+        }, timeoutMs);
+
+        // The new patch's @ReactMethod returns a Promise via the 4th arg.
+        // RN bridge will resolve when promise.resolve("OK") is called by
+        // Kotlin AT THE END of doInitializeTTS (i.e. after init.8.DONE).
+        const p = native.initializeTTS(PIPER_SAMPLE_RATE, 1, JSON.stringify(cfg));
+        if (p && typeof p.then === 'function') {
+          p.then(
+            (result: any) => {
+              clearTimeout(timer);
+              trace('phase6.native.resolve', `result=${result}`);
+              resolve();
+            },
+            (err: any) => {
+              clearTimeout(timer);
+              trace('phase6.native.reject', `${err?.message || err}`);
+              reject(err);
+            }
+          );
+        } else {
+          // Old API fallback (no promise) — should not happen with the
+          // v4 patch. Fall back to optimistic resolution after a delay.
+          clearTimeout(timer);
+          trace('phase6.WARN', 'native did not return promise — using fallback 30s delay');
+          setTimeout(() => resolve(), 30_000);
         }
       });
-      await trace('phase6.done', 'native initializeTTS returned without JNI exception');
+      await trace('phase6.done', 'native initializeTTS resolved promise (FULL init complete)');
 
       ready = true;
       lastError = null;

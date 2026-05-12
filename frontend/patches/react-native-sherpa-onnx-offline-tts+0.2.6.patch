@@ -240,7 +240,7 @@ index 4fdaf4a..342d256 100644
  
      private fun processAccumulatedSamples() {
 diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
-index f76e886..cbb3410 100644
+index f76e886..b6a00fd 100644
 --- a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
 +++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
 @@ -8,9 +8,25 @@ import kotlin.concurrent.thread
@@ -269,7 +269,7 @@ index f76e886..cbb3410 100644
  class ModelLoader(private val context: Context) {
  
      /**
-@@ -86,6 +102,11 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -86,68 +102,309 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
      @Volatile private var stopping = false
      private var pendingPromise: Promise? = null
  
@@ -281,14 +281,55 @@ index f76e886..cbb3410 100644
      override fun getName(): String {
          return "TTSManager"
      }
-@@ -93,61 +114,239 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+ 
      // Initialize TTS and Audio Player
++    //
++    // CRITICAL: this method ACCEPTS A PROMISE so JS can ACTUALLY wait for
++    // the full model load (including the slow xnnpack/cpu inference path
++    // optimization). Without the promise, RN bridge runs this on the
++    // native modules thread and JS returns immediately — leading to JS
++    // calling speak() while the engine is still loading.
      @ReactMethod
-     fun initializeTTS(sampleRate: Double, channels: Int, modelId: String) {
+-    fun initializeTTS(sampleRate: Double, channels: Int, modelId: String) {
 -        // Setup Audio Player
 -        realTimeAudioPlayer = AudioPlayer(sampleRate.toInt(), channels, object : AudioPlayerDelegate {
 -            override fun didUpdateVolume(volume: Float) {
 -                sendVolumeUpdate(volume)
+-
+-                if (volume == -1f) {
+-                    if (stopping) return  // ignore completion emitted by stopPlayer()
+-
+-                    val p = pendingPromise
+-                    pendingPromise = null
+-                    p?.resolve("Playback finished")
++    fun initializeTTS(sampleRate: Double, channels: Int, modelId: String, promise: Promise) {
++        // Run on a background thread to avoid blocking the RN bridge thread
++        // (long model loads can ANR the bridge if blocked >5s).
++        Thread {
++            try {
++                doInitializeTTS(sampleRate, channels, modelId)
++                promise.resolve("OK")
++            } catch (e: Throwable) {
++                nativeTrace(reactContext, "init.FATAL",
++                    "${e.javaClass.simpleName}: ${e.message}")
++                promise.reject("INIT_FAILED", e.message ?: e.javaClass.simpleName, e)
++            }
++        }.start()
++    }
++
++    // Legacy entrypoint kept for backward compatibility (no promise).
++    @ReactMethod
++    fun initializeTTSLegacy(sampleRate: Double, channels: Int, modelId: String) {
++        try {
++            doInitializeTTS(sampleRate, channels, modelId)
++        } catch (e: Throwable) {
++            nativeTrace(reactContext, "init.FATAL.legacy",
++                "${e.javaClass.simpleName}: ${e.message}")
++            throw e
++        }
++    }
++
++    private fun doInitializeTTS(sampleRate: Double, channels: Int, modelId: String) {
 +        // ═══════════════════════════════════════════════════════════════════
 +        // ULTRA-DETAILED INIT TRACE — every sub-step is logged so the user
 +        // can pinpoint EXACTLY which operation died if the JNI crashes.
@@ -374,9 +415,7 @@ index f76e886..cbb3410 100644
 +            nativeTrace(reactContext, "init.3a.model.check.THREW", "${e.javaClass.simpleName}: ${e.message}")
 +            throw e
 +        }
- 
--                if (volume == -1f) {
--                    if (stopping) return  // ignore completion emitted by stopPlayer()
++
 +        // 3b. Verify tokens file
 +        nativeTrace(reactContext, "init.3b.tokens.check", "path=$tokensPath")
 +        try {
@@ -410,22 +449,44 @@ index f76e886..cbb3410 100644
 +            nativeTrace(reactContext, "init.3c.espeak.check.THREW", "${e.javaClass.simpleName}: ${e.message}")
 +            throw e
 +        }
- 
--                    val p = pendingPromise
--                    pendingPromise = null
--                    p?.resolve("Playback finished")
++
 +        // 4. Thread count
++        // PATCH: for large Piper "high" models (>100MB) we cap threads at 2.
++        // More threads = more parallel tensor allocations = higher peak
++        // memory pressure during model load → higher SIGSEGV risk.
 +        val numCores = Runtime.getRuntime().availableProcessors()
++        val modelFile = File(modelPath)
++        val modelSizeMB = modelFile.length() / (1024 * 1024)
 +        val optimalThreads = when {
++            modelSizeMB > 80 -> 2   // big Piper "high" models: limit threads
 +            numCores >= 8 -> 4
 +            numCores >= 6 -> 3
 +            numCores >= 4 -> 2
 +            else -> 1
 +        }
-+        nativeTrace(reactContext, "init.4.threads", "cores=$numCores -> threads=$optimalThreads")
++        nativeTrace(reactContext, "init.4.threads",
++            "cores=$numCores modelMB=$modelSizeMB -> threads=$optimalThreads")
 +
-+        // 5. Provider fallback xnnpack -> cpu
-+        val providers = arrayOf("xnnpack", "cpu")
++        // 5. Provider fallback: CPU FIRST, then xnnpack
++        // ─────────────────────────────────────────────────────────────────
++        // Why CPU first now?
++        //
++        // 1) SIGSEGV is NOT a catchable JVM exception. When xnnpack crashes
++        //    in libonnxruntime.so (e.g. unsupported op for a PyTorch 2.1
++        //    Piper "high" 108MB model), the WHOLE PROCESS DIES instantly.
++        //    The fallback to cpu NEVER runs because there's no recovery.
++        //
++        // 2) The CPU provider is the universal, reference implementation in
++        //    onnxruntime. It handles ALL ops correctly, just slower. For
++        //    audiobook reading, "slower init" is fine.
++        //
++        // 3) xnnpack is a quantized/optimized provider that may not support
++        //    every op. For large Piper "high" models exported with newer
++        //    PyTorch, some attention or LSTM ops can SIGSEGV xnnpack.
++        //
++        // So the new order is: try cpu (likely to succeed) → only if cpu
++        // somehow fails with a CATCHABLE Java exception, try xnnpack.
++        val providers = arrayOf("cpu", "xnnpack")
 +        var createdTts: OfflineTts? = null
 +        var lastErr = ""
 +
@@ -565,7 +626,7 @@ index f76e886..cbb3410 100644
              promise.reject("EMPTY_TEXT", "Input text is empty")
              return
          }
-@@ -155,6 +354,7 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -155,6 +412,7 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
          val player = realTimeAudioPlayer
          val engine = tts
          if (player == null || engine == null) {
@@ -573,7 +634,7 @@ index f76e886..cbb3410 100644
              promise.reject("NOT_INITIALIZED", "TTS is not initialized")
              return
          }
-@@ -167,18 +367,29 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -167,18 +425,29 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
          val playbackId = playbackSeq
          activePlaybackId = playbackId
  
@@ -608,7 +669,7 @@ index f76e886..cbb3410 100644
              pendingPromise = null
              promise.reject("GENERATION_ERROR", "Error during audio generation: ${e.message}")
          }
-@@ -290,17 +501,26 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -290,17 +559,26 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
      }
  
      private fun generateAudio(text: String, sid: Int, speed: Float) {
