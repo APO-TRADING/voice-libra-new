@@ -1,9 +1,9 @@
 import Slider from '@react-native-community/slider';
-import { Check, Copy, Cpu, Moon, RefreshCw, Sun } from 'lucide-react-native';
+import { Check, Copy, Cpu, Mic, Moon, RefreshCw, Sun } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
 import { Alert, Clipboard, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { clearPiperTrace, readPiperTrace } from '../../src/audio/piperEngine';
+import { clearPiperTrace, initEngine, isPiperReady, readPiperTrace, speakSentence } from '../../src/audio/piperEngine';
 import { usePlayer } from '../../src/contexts/PlayerContext';
 import { useTheme } from '../../src/contexts/ThemeContext';
 
@@ -134,7 +134,7 @@ export default function SettingsScreen() {
           <Text style={[styles.rowMeta, { color: colors.textSecondary, marginBottom: 8 }]}>
             Log persistente del motore TTS. Sopravvive ai crash. Apri qui dopo che l'app si chiude e copia il contenuto.
           </Text>
-          <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
+          <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
             <TouchableOpacity
               onPress={refreshTrace}
               style={[styles.toggleBtn, { borderColor: colors.border, paddingHorizontal: 12, flexDirection: 'row', gap: 6 }]}
@@ -154,6 +154,26 @@ export default function SettingsScreen() {
               style={[styles.toggleBtn, { borderColor: colors.border, paddingHorizontal: 12 }]}
             >
               <Text style={[styles.toggleLabel, { color: colors.textPrimary }]}>Reset</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={async () => {
+                try {
+                  if (!isPiperReady()) {
+                    Alert.alert('Inizializzazione Piper', 'Attendi 10-30 sec per la prima setup...');
+                    await initEngine();
+                  }
+                  await speakSentence('Ciao.', 1.0);
+                  Alert.alert('Test OK', 'La voce ha letto "Ciao" correttamente.');
+                } catch (e: any) {
+                  Alert.alert('Test fallito', String(e?.message || e));
+                } finally {
+                  refreshTrace();
+                }
+              }}
+              style={[styles.toggleBtn, { borderColor: colors.primaryActive, paddingHorizontal: 12, flexDirection: 'row', gap: 6 }]}
+            >
+              <Mic color={colors.primaryActive} size={14} />
+              <Text style={[styles.toggleLabel, { color: colors.primaryActive }]}>Test voce</Text>
             </TouchableOpacity>
           </View>
           <ScrollView
