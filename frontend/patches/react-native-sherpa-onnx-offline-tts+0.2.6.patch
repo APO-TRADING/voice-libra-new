@@ -1,3 +1,43 @@
+diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle b/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
+index f2fd70a..370e416 100644
+--- a/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
++++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
+@@ -86,6 +86,13 @@ android {
+ repositories {
+   mavenCentral()
+   google()
++  // PATCH (beppe-audiobooks): pull the latest sherpa-onnx AAR via JitPack
++  // instead of the bundled local libs/sherpa-onnx-1.10.35.aar — the old
++  // version (Oct 2023) crashes (SIGSEGV) when loading recent Piper models
++  // exported with PyTorch >= 2.1, even though the opset (15) and ops are
++  // standard. v1.12.15 (Oct 2024) includes onnxruntime updates that fix
++  // the loading path for these models.
++  maven { url 'https://jitpack.io' }
+   flatDir {
+         dirs 'libs' // Specifies the 'libs' directory for local AARs
+     }
+@@ -93,18 +100,15 @@ repositories {
+ 
+ def kotlin_version = getExtOrDefault("kotlinVersion")
+ 
+-// compileOnly files('libs/sherpa-onnx-1.10.35.aar')
+-
+ dependencies {
+   // For < 0.71, this will be from the local maven repo
+   // For > 0.71, this will be replaced by `com.facebook.react:react-android:$version` by react gradle plugin
+   //noinspection GradleDynamicVersion
+   implementation "com.facebook.react:react-native:0.75.3"
+   implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
+-  implementation files('libs/sherpa-onnx-1.10.35.aar')
+-  // compileOnly files('libs/sherpa-onnx-1.10.35.aar')
+-  // implementation "com.k2fsa:sherpa-onnx:+"
+-  // implementation(name:'sherpa-onnx-1.10.35.aar', ext:'aar')
++  // PATCH (beppe-audiobooks): upgraded from local 1.10.35 → JitPack 1.12.15
++  implementation 'com.github.k2-fsa:sherpa-onnx:v1.12.15'
++  // implementation files('libs/sherpa-onnx-1.10.35.aar')
+ }
+ 
+ 
 diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt
 index 4fdaf4a..70c917a 100644
 --- a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt
