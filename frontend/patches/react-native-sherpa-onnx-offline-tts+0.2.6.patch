@@ -87,11 +87,107 @@ index 4fdaf4a..70c917a 100644
                      maybeSendCompletion()
                  } catch (e: InterruptedException) {
 diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
-index f76e886..70ec5c4 100644
+index f76e886..924d423 100644
 --- a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
 +++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
-@@ -170,11 +170,24 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -8,9 +8,24 @@ import kotlin.concurrent.thread
+ import android.content.Context
+ import java.io.File
+ import java.io.FileOutputStream
++import java.io.FileWriter
+ import java.io.IOException
+ import org.json.JSONObject
+ 
++// Helper (beppe-audiobooks): append a single line to the same piper-trace.log
++// file that the JS layer is writing to, so we can see both JS- and native-side
++// progress interleaved in the diagnostics screen.
++private fun nativeTrace(ctx: Context, step: String, info: String = "") {
++    try {
++        val f = File(ctx.filesDir, "piper-trace.log")
++        val line = "[" + java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).also {
++            it.timeZone = java.util.TimeZone.getTimeZone("UTC")
++        }.format(java.util.Date()) + "] [native] " + step + (if (info.isNotEmpty()) " :: $info" else "") + "\n"
++        FileWriter(f, true).use { it.write(line) }
++        android.util.Log.d("piper-trace", line.trim())
++    } catch (_: Exception) { /* never let logging crash the JNI thread */ }
++}
++
+ class ModelLoader(private val context: Context) {
+ 
+     /**
+@@ -93,6 +108,7 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+     // Initialize TTS and Audio Player
+     @ReactMethod
+     fun initializeTTS(sampleRate: Double, channels: Int, modelId: String) {
++        nativeTrace(reactContext, "initializeTTS", "sr=${sampleRate.toInt()} ch=$channels")
+         // Setup Audio Player
+         realTimeAudioPlayer = AudioPlayer(sampleRate.toInt(), channels, object : AudioPlayerDelegate {
+             override fun didUpdateVolume(volume: Float) {
+@@ -110,18 +126,11 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+ 
+ 
+         // Determine model paths based on modelId
+-        
+-        // val modelDirAssetPath = "models"
+-        // val modelDirInternal = reactContext.filesDir
+-        // modelLoader.copyAssetDirectory(modelDirAssetPath, modelDirInternal)
+-        // val modelPath = File(modelDirInternal, if (modelId.lowercase() == "male") "en_US-ryan-medium.onnx" else "en_US-hfc_female-medium.onnx").absolutePath
+-        // val tokensPath = File(modelDirInternal, "tokens.txt").absolutePath
+-        // val dataDirPath = File(modelDirInternal, "espeak-ng-data").absolutePath // Directory copy handled above
+-
+         val jsonObject = JSONObject(modelId)
+         val modelPath = jsonObject.getString("modelPath")
+         val tokensPath = jsonObject.getString("tokensPath")
+         val dataDirPath = jsonObject.getString("dataDirPath")
++        nativeTrace(reactContext, "initializeTTS", "paths parsed model=$modelPath")
+ 
+         // Build OfflineTtsConfig using the helper function
+         val config = OfflineTtsConfig(
+@@ -137,17 +146,28 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+           )
+ 
+         // Initialize sherpa-onnx offline TTS
++        nativeTrace(reactContext, "initializeTTS", "creating OfflineTts...")
+         tts = OfflineTts(config=config)
++        nativeTrace(reactContext, "initializeTTS", "OfflineTts created OK")
+ 
+         // Start the audio player
+-        realTimeAudioPlayer?.start()
++        nativeTrace(reactContext, "initializeTTS", "audioPlayer.start()...")
++        try {
++            realTimeAudioPlayer?.start()
++            nativeTrace(reactContext, "initializeTTS", "audioPlayer.start() OK")
++        } catch (e: Throwable) {
++            nativeTrace(reactContext, "initializeTTS", "audioPlayer.start() THREW: ${e.javaClass.simpleName}: ${e.message}")
++            throw e
++        }
+     }
+ 
+     // Generate and Play method exposed to React Native
+     @ReactMethod
+     fun generateAndPlay(text: String, sid: Int, speed: Double, promise: Promise) {
+         val trimmedText = text.trim()
++        nativeTrace(reactContext, "generateAndPlay", "len=${trimmedText.length} sid=$sid speed=$speed text=\"${trimmedText.take(60)}\"")
+         if (trimmedText.isEmpty()) {
++            nativeTrace(reactContext, "generateAndPlay", "REJECT: empty text")
+             promise.reject("EMPTY_TEXT", "Input text is empty")
+             return
+         }
+@@ -155,6 +175,7 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+         val player = realTimeAudioPlayer
+         val engine = tts
+         if (player == null || engine == null) {
++            nativeTrace(reactContext, "generateAndPlay", "REJECT: player=${player != null} engine=${engine != null}")
+             promise.reject("NOT_INITIALIZED", "TTS is not initialized")
+             return
+         }
+@@ -167,18 +188,28 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+         val playbackId = playbackSeq
+         activePlaybackId = playbackId
+ 
++        nativeTrace(reactContext, "generateAndPlay", "beginPlayback id=$playbackId")
          player.beginPlayback(playbackId)
++        nativeTrace(reactContext, "generateAndPlay", "beginPlayback OK")
  
          try {
 -            val sentences = splitText(trimmedText, 15)
@@ -99,24 +195,53 @@ index f76e886..70ec5c4 100644
 -                val processedSentence = if (sentence.endsWith(".")) sentence else "$sentence."
 -                generateAudio(processedSentence, sid, speed.toFloat())
 -            }
-+            // PATCH (beppe-audiobooks): the upstream module shipped a hard
-+            // splitText(text, 15) that would cut long sentences on
-+            // lastIndexOf(',') and then append "." → the malformed sequence
-+            // ",." crashes espeak-ng's phonemizer at the JNI layer, killing
-+            // the whole app with SIGSEGV.
-+            //
-+            // The JS layer already splits the text into proper sentences on
-+            // .!? boundaries (via textProcessor.ts:splitSentences), so we
-+            // hand the whole sentence to Sherpa-ONNX in one shot. Sherpa
-+            // handles long sentences + internal commas natively as natural
-+            // prosodic pauses.
++            // PATCH (beppe-audiobooks): bypass splitText(15) — pass full sentence
++            // to sherpa-onnx, which natively handles internal commas as pauses.
 +            val processedSentence = if (
 +                trimmedText.endsWith(".") ||
 +                trimmedText.endsWith("!") ||
 +                trimmedText.endsWith("?") ||
 +                trimmedText.endsWith("…")
 +            ) trimmedText else "$trimmedText."
++            nativeTrace(reactContext, "generateAndPlay", "calling generateAudio for sentence len=${processedSentence.length}")
 +            generateAudio(processedSentence, sid, speed.toFloat())
++            nativeTrace(reactContext, "generateAndPlay", "generateAudio returned, calling endEnqueue")
              // IMPORTANT: tell player no more buffers are coming
              player.endEnqueue()
++            nativeTrace(reactContext, "generateAndPlay", "endEnqueue OK — waiting for player completion")
              // DO NOT resolve here; resolved when volume == -1
+         } catch (e: Exception) {
++            nativeTrace(reactContext, "generateAndPlay", "EXCEPTION: ${e.javaClass.simpleName}: ${e.message}")
+             pendingPromise = null
+             promise.reject("GENERATION_ERROR", "Error during audio generation: ${e.message}")
+         }
+@@ -290,17 +321,25 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+     }
+ 
+     private fun generateAudio(text: String, sid: Int, speed: Float) {
++        nativeTrace(reactContext, "generateAudio", "ENTER text=\"${text.take(60)}\" sid=$sid speed=$speed")
+         val startTime = System.currentTimeMillis()
+-        val audio = tts?.generate(text, sid, speed)
++        val audio = try {
++            tts?.generate(text, sid, speed)
++        } catch (e: Throwable) {
++            nativeTrace(reactContext, "generateAudio", "tts.generate THREW: ${e.javaClass.simpleName}: ${e.message}")
++            throw e
++        }
+         val endTime = System.currentTimeMillis()
+         val generationTime = (endTime - startTime) / 1000.0
++        nativeTrace(reactContext, "generateAudio", "tts.generate OK in ${generationTime}s")
+         println("Time taken for TTS generation: $generationTime seconds")
+-
+         if (audio == null) {
+-            println("Error: TTS was never initialized or audio generation failed")
+-            return
++            nativeTrace(reactContext, "generateAudio", "audio==NULL after generate")
++            throw IllegalStateException("Sherpa returned null audio")
+         }
++        nativeTrace(reactContext, "generateAudio", "audio.samples.size=${audio.samples.size} sampleRate=${audio.sampleRate}")
+         realTimeAudioPlayer?.enqueueAudioData(audio.samples, audio.sampleRate)
++        nativeTrace(reactContext, "generateAudio", "enqueueAudioData OK, EXIT")
+     }
+ 
+     private fun sendVolumeUpdate(volume: Float) {
