@@ -1,0 +1,34 @@
+diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
+index f76e886..70ec5c4 100644
+--- a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
++++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
+@@ -170,11 +170,24 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+         player.beginPlayback(playbackId)
+ 
+         try {
+-            val sentences = splitText(trimmedText, 15)
+-            for (sentence in sentences) {
+-                val processedSentence = if (sentence.endsWith(".")) sentence else "$sentence."
+-                generateAudio(processedSentence, sid, speed.toFloat())
+-            }
++            // PATCH (beppe-audiobooks): the upstream module shipped a hard
++            // splitText(text, 15) that would cut long sentences on
++            // lastIndexOf(',') and then append "." → the malformed sequence
++            // ",." crashes espeak-ng's phonemizer at the JNI layer, killing
++            // the whole app with SIGSEGV.
++            //
++            // The JS layer already splits the text into proper sentences on
++            // .!? boundaries (via textProcessor.ts:splitSentences), so we
++            // hand the whole sentence to Sherpa-ONNX in one shot. Sherpa
++            // handles long sentences + internal commas natively as natural
++            // prosodic pauses.
++            val processedSentence = if (
++                trimmedText.endsWith(".") ||
++                trimmedText.endsWith("!") ||
++                trimmedText.endsWith("?") ||
++                trimmedText.endsWith("…")
++            ) trimmedText else "$trimmedText."
++            generateAudio(processedSentence, sid, speed.toFloat())
+             // IMPORTANT: tell player no more buffers are coming
+             player.endEnqueue()
+             // DO NOT resolve here; resolved when volume == -1

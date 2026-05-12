@@ -249,35 +249,25 @@ export function isPiperReady(): boolean {
 
 // Sanitize a sentence before sending to Sherpa-ONNX.
 //
-// The Kotlin wrapper (react-native-sherpa-onnx-offline-tts 0.2.6) does a
-// blind splitText(text, 15 words) and appends "." to every chunk. If the
-// chunk happens to end with a comma (it cuts on lastIndexOf(',')), you get
-// the sequence ",." which crashes espeak-ng's phonemizer at the JNI layer
-// — no recoverable exception, the app gets SIGKILL'd.
+// We patch the native module (see patches/react-native-sherpa-onnx-offline-tts*)
+// to bypass its destructive splitText(15) chunking. With the patch in place,
+// Sherpa receives the FULL sentence in one call and handles internal commas
+// natively as prosodic pauses (just what we want for natural reading).
 //
-// To make the wrapper safe we remove all comma-like punctuation BEFORE
-// passing the sentence in. The sentence boundary (.!?) is already handled
-// upstream by splitSentences() in textProcessor.ts — here we keep the whole
-// sentence as one unit and rely on the wrapper to chunk it at word
-// boundaries only (no longer at commas, since there are none).
-//
-// What's stripped:
+// So here we only normalize a few characters that genuinely break espeak's
+// phonemizer; we DO PRESERVE commas (",") and other internal punctuation:
 //   - hyphens inside words   ("re-in-attesa" -> "re in attesa")
-//   - em/en dashes           ("—", "–")  -> space
-//   - commas / semicolons / colons   -> space
-//   - control chars
-// What's preserved:
-//   - .!? at the end (only)  — actually stripped so the wrapper's own "."
-//     append is the single terminator.
+//     espeak treats hyphenated words inconsistently and can crash on them
+//   - em/en dashes "—" "–"   -> ", "  (kept as a prosodic pause)
+//   - control chars          -> space
+//   - multiple spaces        -> single space
 function sanitizeForPiper(raw: string): string {
   return raw
     .replace(/(\p{L})-(\p{L})/gu, '$1 $2')
-    .replace(/[—–]/g, ' ')
-    .replace(/[,;:]/g, ' ')
+    .replace(/\s*[—–]\s*/g, ', ')
     .replace(/[\u0000-\u001F\u007F]/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/[,.;:!?]+$/, '');
+    .trim();
 }
 
 export async function speakSentence(text: string, lengthScale: number): Promise<void> {
