@@ -127,7 +127,7 @@ index 4fdaf4a..70c917a 100644
                      maybeSendCompletion()
                  } catch (e: InterruptedException) {
 diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
-index f76e886..924d423 100644
+index f76e886..61121e9 100644
 --- a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
 +++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
 @@ -8,9 +8,24 @@ import kotlin.concurrent.thread
@@ -163,7 +163,7 @@ index f76e886..924d423 100644
          // Setup Audio Player
          realTimeAudioPlayer = AudioPlayer(sampleRate.toInt(), channels, object : AudioPlayerDelegate {
              override fun didUpdateVolume(volume: Float) {
-@@ -110,18 +126,11 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -110,44 +126,92 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
  
  
          // Determine model paths based on modelId
@@ -179,17 +179,82 @@ index f76e886..924d423 100644
          val modelPath = jsonObject.getString("modelPath")
          val tokensPath = jsonObject.getString("tokensPath")
          val dataDirPath = jsonObject.getString("dataDirPath")
+-
+-        // Build OfflineTtsConfig using the helper function
 +        nativeTrace(reactContext, "initializeTTS", "paths parsed model=$modelPath")
- 
-         // Build OfflineTtsConfig using the helper function
++
++        // Build OfflineTtsConfig — values aligned with VoxSherpa-TTS, the
++        // canonical sherpa-onnx Android client listed in sherpa-onnx's
++        // official README. Without these explicit values, the VITS sampler
++        // gets noiseScale=0.0 (Kotlin Float default) which produces NaN
++        // tensors and SIGSEGVs the onnxruntime native layer during inference.
++        //
++        // Piper upstream defaults:
++        //   noise_scale   = 0.667
++        //   noise_scale_w = 0.8
++        //   length_scale  = 1.0   (overridden at generate() time by `speed`)
++        val numCores = Runtime.getRuntime().availableProcessors()
++        val optimalThreads = when {
++            numCores >= 8 -> 4
++            numCores >= 6 -> 3
++            numCores >= 4 -> 2
++            else -> 1
++        }
          val config = OfflineTtsConfig(
-@@ -137,17 +146,28 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
-           )
+-            model=OfflineTtsModelConfig(
+-              vits=OfflineTtsVitsModelConfig(
+-                model=modelPath,
+-                tokens=tokensPath,
+-                dataDir=dataDirPath,
+-              ),
+-              numThreads=1,
+-              debug=true,
+-            )
+-          )
++            model = OfflineTtsModelConfig(
++                vits = OfflineTtsVitsModelConfig(
++                    model = modelPath,
++                    tokens = tokensPath,
++                    dataDir = dataDirPath,
++                    noiseScale = 0.667f,
++                    noiseScaleW = 0.8f,
++                    lengthScale = 1.0f,
++                ),
++                numThreads = optimalThreads,
++                debug = false,
++                provider = "cpu",
++            ),
++            maxNumSentences = 5,
++        )
++        nativeTrace(reactContext, "initializeTTS", "config built: noiseScale=0.667 noiseScaleW=0.8 lengthScale=1.0 numThreads=$optimalThreads provider=cpu maxNumSentences=5")
  
          // Initialize sherpa-onnx offline TTS
+-        tts = OfflineTts(config=config)
 +        nativeTrace(reactContext, "initializeTTS", "creating OfflineTts...")
-         tts = OfflineTts(config=config)
-+        nativeTrace(reactContext, "initializeTTS", "OfflineTts created OK")
++        try {
++            tts = OfflineTts(config = config)
++            nativeTrace(reactContext, "initializeTTS", "OfflineTts created OK")
++        } catch (e: Throwable) {
++            nativeTrace(reactContext, "initializeTTS", "OfflineTts() THREW: ${e.javaClass.simpleName}: ${e.message}")
++            throw e
++        }
++
++        // Sanity check (taken from VoxSherpa): immediately try a tiny synthesis
++        // with a safe text to fail fast if the model/runtime combo is broken,
++        // rather than crashing on the user's first real Play tap.
++        try {
++            nativeTrace(reactContext, "initializeTTS", "sanity generate('Hello')...")
++            val testAudio = tts?.generate("Hello", 0, 1.0f)
++            val testSize = testAudio?.samples?.size ?: 0
++            nativeTrace(reactContext, "initializeTTS", "sanity OK samples=$testSize")
++            if (testSize == 0) {
++                nativeTrace(reactContext, "initializeTTS", "WARN: sanity returned 0 samples")
++            }
++        } catch (e: Throwable) {
++            nativeTrace(reactContext, "initializeTTS", "sanity THREW: ${e.javaClass.simpleName}: ${e.message}")
++            // Don't throw — let initialization succeed; the real failure
++            // surface will be the next generateAndPlay call.
++        }
  
          // Start the audio player
 -        realTimeAudioPlayer?.start()
@@ -213,7 +278,7 @@ index f76e886..924d423 100644
              promise.reject("EMPTY_TEXT", "Input text is empty")
              return
          }
-@@ -155,6 +175,7 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -155,6 +219,7 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
          val player = realTimeAudioPlayer
          val engine = tts
          if (player == null || engine == null) {
@@ -221,7 +286,7 @@ index f76e886..924d423 100644
              promise.reject("NOT_INITIALIZED", "TTS is not initialized")
              return
          }
-@@ -167,18 +188,28 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -167,18 +232,28 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
          val playbackId = playbackSeq
          activePlaybackId = playbackId
  
@@ -255,7 +320,7 @@ index f76e886..924d423 100644
              pendingPromise = null
              promise.reject("GENERATION_ERROR", "Error during audio generation: ${e.message}")
          }
-@@ -290,17 +321,25 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -290,17 +365,25 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
      }
  
      private fun generateAudio(text: String, sid: Int, speed: Float) {
