@@ -101,3 +101,75 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+
+user_problem_statement: |
+  Audiolibri mobile offline app powered by Piper TTS (sherpa-onnx), Italian.
+  Persistent SIGSEGV crash during sherpa-onnx OfflineTts inference with a custom
+  beppe.onnx Italian Piper model. App architecture is 100% offline (no backend).
+
+frontend:
+  - task: "Piper TTS native engine (sherpa-onnx) SIGSEGV crash"
+    implemented: true
+    working: "NA"  # awaiting user EAS build + device test
+    file: "frontend/patches/react-native-sherpa-onnx-offline-tts+0.2.6.patch"
+    stuck_count: 3
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: false
+        agent: "main"
+        comment: |
+          Initial issue: SIGSEGV during OfflineTts inference. App crashed before
+          producing any audio. Bundled AAR was 1.10.35 (Oct 2023) — incompatible
+          with PyTorch 2.1+ Piper models.
+      - working: false
+        agent: "main"
+        comment: |
+          First patch attempt: upgraded JitPack AAR to 1.12.15, switched
+          AudioTrack ENCODING_PCM_FLOAT → PCM_16BIT, bypassed splitText, added
+          OfflineTtsConfig with noiseScale 0.667, noiseScaleW 0.8 (vanilla).
+          User reported still SIGSEGV on first generate() — init-sherpa OK but
+          crash on "Ciao." playback.
+      - working: "NA"
+        agent: "main"
+        comment: |
+          v2 patch (current): MAJOR redesign based on VoxSherpa-TTS reference
+          (k2-fsa officially listed Android app on Google Play, proven Piper
+          working). Changes:
+          (1) Upgraded JitPack 1.12.15 → 1.12.26 (latest May 2026)
+          (2) Provider fallback: try "xnnpack" first, then "cpu" — XNNPACK uses
+              completely different kernels that bypass the buggy CPU codepath
+              causing SIGSEGV in onnxruntime VITS inference
+          (3) Switched VITS sampling to VoxSherpa "calmed" defaults
+              noiseScale=0.35f (was 0.667), noiseScaleW=0.667f (was 0.8) —
+              lower noise = fewer NaN tensors during sampling
+          (4) Sanity check generate("Hello") inside fallback loop — only
+              accept the provider that successfully synthesizes > 0 samples
+          (5) maxNumSentences=1 (we already pass single sentences)
+          (6) Granular [native] nativeTrace logging to piper-trace.log at
+              every JNI step for crash diagnostics
+          Waiting on user to: cd frontend && npx expo prebuild --clean &&
+          eas build --platform android --profile preview --clear-cache
+          and provide DIAGNOSTICA PIPER trace after launch.
+
+metadata:
+  created_by: "main_agent"
+  version: "2.0"
+  test_sequence: 0
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Piper TTS native engine (sherpa-onnx) SIGSEGV crash"
+  stuck_tasks:
+    - "Piper TTS native engine (sherpa-onnx) SIGSEGV crash"
+  test_all: false
+  test_priority: "stuck_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Patch v2 applied. JitPack 1.12.15 → 1.12.26, xnnpack→cpu provider
+      fallback, VoxSherpa "calmed" VITS defaults. Native testing requires
+      EAS build + physical Android device — cannot be tested by automated
+      agents. User to rebuild APK and share DIAGNOSTICA PIPER trace.
