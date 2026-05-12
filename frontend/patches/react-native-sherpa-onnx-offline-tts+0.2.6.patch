@@ -1,5 +1,5 @@
 diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle b/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
-index f2fd70a..143c827 100644
+index f2fd70a..9c6c9c1 100644
 --- a/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
 +++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
 @@ -86,6 +86,12 @@ android {
@@ -32,83 +32,175 @@ index f2fd70a..143c827 100644
 -  // implementation "com.k2fsa:sherpa-onnx:+"
 -  // implementation(name:'sherpa-onnx-1.10.35.aar', ext:'aar')
 +  // PATCH (beppe-audiobooks): upgraded local 1.10.35 -> JitPack 1.12.26
-+  implementation 'com.github.k2-fsa:sherpa-onnx:v1.12.26'
++  implementation 'com.github.k2-fsa:sherpa-onnx:1.12.26'
 +  // implementation files('libs/sherpa-onnx-1.10.35.aar')
  }
  
  
 diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt
-index 4fdaf4a..8609854 100644
+index 4fdaf4a..342d256 100644
 --- a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt
 +++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt
-@@ -60,11 +60,20 @@ class AudioPlayer(
+@@ -1,14 +1,36 @@
+ package com.sherpaonnxofflinetts
+ 
++import android.content.Context
+ import android.media.AudioAttributes
+ import android.media.AudioFormat
+ import android.media.AudioTrack
+ import android.os.Handler
+ import android.os.Looper
+ import android.util.Log
++import java.io.File
++import java.io.FileWriter
+ import java.util.concurrent.LinkedBlockingQueue
+ import kotlin.math.abs
+ 
++// Static trace helper — wired from TTSManagerModule.init {} so it writes
++// to the same piper-trace.log as everyone else. Reused across all
++// AudioPlayer instances.
++internal object AudioPlayerTrace {
++    @Volatile var ctx: Context? = null
++    fun log(step: String, info: String = "") {
++        val c = ctx ?: return
++        try {
++            val f = File(c.filesDir, "piper-trace.log")
++            val ts = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).also {
++                it.timeZone = java.util.TimeZone.getTimeZone("UTC")
++            }.format(java.util.Date())
++            val line = "[$ts] [audio] $step" + (if (info.isNotEmpty()) " :: $info" else "") + "\n"
++            FileWriter(f, true).use { it.write(line) }
++            Log.d("piper-trace", line.trim())
++        } catch (_: Exception) { }
++    }
++}
++
+ class AudioPlayer(
+     private val sampleRate: Int,
+     private val channels: Int,
+@@ -54,68 +76,136 @@ class AudioPlayer(
+     }
+ 
+     fun start() {
+-        if (isRunning) return
++        AudioPlayerTrace.log("start.enter", "isRunning=$isRunning sr=$sampleRate ch=$channels")
++        if (isRunning) {
++            AudioPlayerTrace.log("start.skip", "already running")
++            return
++        }
+         val channelConfig = if (channels == 1)
+             AudioFormat.CHANNEL_OUT_MONO
          else
              AudioFormat.CHANNEL_OUT_STEREO
++        AudioPlayerTrace.log("start.config", "channelConfig=$channelConfig")
  
 +        // PATCH (beppe-audiobooks): swap PCM_FLOAT -> PCM_16BIT.
-+        // PCM_FLOAT is technically supported from Android 5.0 but many
-+        // devices (HAL/driver dependent) fail at AudioTrack init or
-+        // SIGSEGV on the first AudioTrack.write(FloatArray) call when
-+        // paired with non-44100 sample rates (e.g. Piper's 22050).
-+        // PCM_16BIT is universally supported. Float samples are converted
-+        // on the fly in the playback thread before being pushed to JNI.
 +        val encoding = AudioFormat.ENCODING_PCM_16BIT
 +        val bytesPerSample = 2
          val desiredBufferDurationMs = 20
          val bufferSizeInSamples = (sampleRate * desiredBufferDurationMs) / 1000
 -        val bufferSizeInBytes = bufferSizeInSamples * 4 * channels
 +        val bufferSizeInBytes = bufferSizeInSamples * bytesPerSample * channels
++        AudioPlayerTrace.log("start.buffer.calc", "samples=$bufferSizeInSamples bytes=$bufferSizeInBytes")
++
++        AudioPlayerTrace.log("start.minBuffer.query", "encoding=ENCODING_PCM_16BIT")
          val minBufferSizeInBytes = AudioTrack.getMinBufferSize(
 -            sampleRate, channelConfig, AudioFormat.ENCODING_PCM_FLOAT
 +            sampleRate, channelConfig, encoding
          )
++        AudioPlayerTrace.log("start.minBuffer.result", "minBufferSize=$minBufferSizeInBytes")
  
          if (minBufferSizeInBytes == AudioTrack.ERROR || minBufferSizeInBytes == AudioTrack.ERROR_BAD_VALUE) {
-@@ -73,25 +82,35 @@ class AudioPlayer(
+-            throw IllegalStateException("Invalid buffer size")
++            AudioPlayerTrace.log("start.minBuffer.FAIL", "got=$minBufferSizeInBytes")
++            throw IllegalStateException("Invalid buffer size: $minBufferSizeInBytes (sr=$sampleRate ch=$channelConfig enc=$encoding)")
+         }
  
          val finalBufferSizeInBytes = maxOf(bufferSizeInBytes, minBufferSizeInBytes)
- 
+-
 -        audioTrack = AudioTrack.Builder()
-+        val track = AudioTrack.Builder()
-             .setAudioAttributes(
-                 AudioAttributes.Builder()
-                     .setUsage(AudioAttributes.USAGE_MEDIA)
+-            .setAudioAttributes(
+-                AudioAttributes.Builder()
+-                    .setUsage(AudioAttributes.USAGE_MEDIA)
 -                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC) // ← CHANGED
-+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                     .build()
-             )
-             .setAudioFormat(
-                 AudioFormat.Builder()
-                     .setSampleRate(sampleRate)
-                     .setChannelMask(channelConfig)
+-                    .build()
+-            )
+-            .setAudioFormat(
+-                AudioFormat.Builder()
+-                    .setSampleRate(sampleRate)
+-                    .setChannelMask(channelConfig)
 -                    .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
-+                    .setEncoding(encoding)
-                     .build()
-             )
-             .setTransferMode(AudioTrack.MODE_STREAM)
-             .setBufferSizeInBytes(finalBufferSizeInBytes)
-             .build()
- 
--        audioTrack?.play()
-+        // Fail fast if init didn't actually succeed (e.g. unsupported sample
-+        // rate on this device). Without this check, .play() silently no-ops
-+        // and the subsequent .write() can SIGSEGV in native code.
+-                    .build()
++        AudioPlayerTrace.log("start.buffer.final", "finalBufferSize=$finalBufferSizeInBytes")
++
++        AudioPlayerTrace.log("start.builder.build", "calling AudioTrack.Builder().build()...")
++        val track = try {
++            AudioTrack.Builder()
++                .setAudioAttributes(
++                    AudioAttributes.Builder()
++                        .setUsage(AudioAttributes.USAGE_MEDIA)
++                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
++                        .build()
++                )
++                .setAudioFormat(
++                    AudioFormat.Builder()
++                        .setSampleRate(sampleRate)
++                        .setChannelMask(channelConfig)
++                        .setEncoding(encoding)
++                        .build()
++                )
++                .setTransferMode(AudioTrack.MODE_STREAM)
++                .setBufferSizeInBytes(finalBufferSizeInBytes)
++                .build()
++        } catch (e: Throwable) {
++            AudioPlayerTrace.log("start.builder.THREW", "${e.javaClass.simpleName}: ${e.message}")
++            throw e
++        }
++        AudioPlayerTrace.log("start.builder.built", "state=${track.state} (1=INITIALIZED)")
++
++        // Fail fast if init didn't actually succeed.
 +        if (track.state != AudioTrack.STATE_INITIALIZED) {
++            AudioPlayerTrace.log("start.builder.STATE_FAIL", "state=${track.state}")
 +            try { track.release() } catch (_: Exception) {}
 +            throw IllegalStateException(
 +                "AudioTrack init failed: state=${track.state} sr=$sampleRate enc=$encoding"
-+            )
+             )
+-            .setTransferMode(AudioTrack.MODE_STREAM)
+-            .setBufferSizeInBytes(finalBufferSizeInBytes)
+-            .build()
+-
+-        audioTrack?.play()
 +        }
 +        audioTrack = track
-+        track.play()
++
++        AudioPlayerTrace.log("start.audioTrack.play", "calling .play()")
++        try {
++            track.play()
++            AudioPlayerTrace.log("start.audioTrack.play.ok", "playState=${track.playState}")
++        } catch (e: Throwable) {
++            AudioPlayerTrace.log("start.audioTrack.play.THREW", "${e.javaClass.simpleName}: ${e.message}")
++            throw e
++        }
          isRunning = true
  
          mainHandler.post(volumeUpdateRunnable)
-@@ -105,8 +124,19 @@ class AudioPlayer(
++        AudioPlayerTrace.log("start.volume.runnable.posted", "ok")
+ 
+         playbackThread = Thread {
++            AudioPlayerTrace.log("playback.thread.enter", "tid=${Thread.currentThread().id}")
+             Log.d("audioplayer", "Playback thread started.")
++            var chunkCount = 0
+             while (isRunning) {
+                 try {
+                     val samples = audioQueue.take()
++                    chunkCount++
++                    if (chunkCount <= 3 || chunkCount % 50 == 0) {
++                        AudioPlayerTrace.log("playback.chunk.take", "chunk#$chunkCount size=${samples.size}")
++                    }
+                     synchronized(this) {
                          accumulationBuffer.addAll(samples.asList())
                          processAccumulatedSamples()
                      }
-+                    // Convert FloatArray [-1.0, 1.0] -> ShortArray [-32768, 32767]
 +                    val shortSamples = ShortArray(samples.size)
 +                    for (i in samples.indices) {
 +                        val v = samples[i]
@@ -121,12 +213,34 @@ index 4fdaf4a..8609854 100644
 +                    }
                      pendingWrites += 1
 -                    audioTrack?.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
-+                    audioTrack?.write(shortSamples, 0, shortSamples.size, AudioTrack.WRITE_BLOCKING)
++                    val written = audioTrack?.write(shortSamples, 0, shortSamples.size, AudioTrack.WRITE_BLOCKING) ?: -1
++                    if (chunkCount <= 3 || chunkCount % 50 == 0) {
++                        AudioPlayerTrace.log("playback.chunk.write", "chunk#$chunkCount wrote=$written/${shortSamples.size}")
++                    }
++                    if (written < 0) {
++                        AudioPlayerTrace.log("playback.chunk.write.ERR", "chunk#$chunkCount returned=$written")
++                    }
                      pendingWrites -= 1
                      maybeSendCompletion()
                  } catch (e: InterruptedException) {
++                    AudioPlayerTrace.log("playback.thread.interrupted", "exiting")
++                    isRunning = false
++                    break
++                } catch (e: Throwable) {
++                    AudioPlayerTrace.log("playback.thread.THREW", "${e.javaClass.simpleName}: ${e.message}")
+                     isRunning = false
+                     break
+                 }
+             }
++            AudioPlayerTrace.log("playback.thread.exit", "chunks=$chunkCount")
+         }
+         playbackThread?.start()
++        AudioPlayerTrace.log("start.exit", "playbackThread started ok")
+     }
+ 
+     private fun processAccumulatedSamples() {
 diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
-index f76e886..df9b76a 100644
+index f76e886..cbb3410 100644
 --- a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
 +++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
 @@ -8,9 +8,25 @@ import kotlin.concurrent.thread
@@ -155,18 +269,237 @@ index f76e886..df9b76a 100644
  class ModelLoader(private val context: Context) {
  
      /**
-@@ -93,6 +109,7 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -86,6 +102,11 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+     @Volatile private var stopping = false
+     private var pendingPromise: Promise? = null
+ 
++    init {
++        AudioPlayerTrace.ctx = reactContext.applicationContext
++        nativeTrace(reactContext, "module.init", "TTSManagerModule constructed, AudioPlayerTrace wired")
++    }
++
+     override fun getName(): String {
+         return "TTSManager"
+     }
+@@ -93,61 +114,239 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
      // Initialize TTS and Audio Player
      @ReactMethod
      fun initializeTTS(sampleRate: Double, channels: Int, modelId: String) {
-+        nativeTrace(reactContext, "initializeTTS", "sr=${sampleRate.toInt()} ch=$channels")
-         // Setup Audio Player
-         realTimeAudioPlayer = AudioPlayer(sampleRate.toInt(), channels, object : AudioPlayerDelegate {
-             override fun didUpdateVolume(volume: Float) {
-@@ -110,44 +127,105 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+-        // Setup Audio Player
+-        realTimeAudioPlayer = AudioPlayer(sampleRate.toInt(), channels, object : AudioPlayerDelegate {
+-            override fun didUpdateVolume(volume: Float) {
+-                sendVolumeUpdate(volume)
++        // ═══════════════════════════════════════════════════════════════════
++        // ULTRA-DETAILED INIT TRACE — every sub-step is logged so the user
++        // can pinpoint EXACTLY which operation died if the JNI crashes.
++        // ═══════════════════════════════════════════════════════════════════
++        val t0 = System.currentTimeMillis()
++        nativeTrace(reactContext, "init.0.enter", "sr=${sampleRate.toInt()} ch=$channels modelIdLen=${modelId.length}")
++
++        // 0a. System info
++        try {
++            val rt = Runtime.getRuntime()
++            val totalMb = rt.totalMemory() / (1024 * 1024)
++            val freeMb = rt.freeMemory() / (1024 * 1024)
++            val maxMb = rt.maxMemory() / (1024 * 1024)
++            val abi = android.os.Build.SUPPORTED_ABIS.joinToString(",")
++            nativeTrace(reactContext, "init.0a.sysinfo",
++                "abi=$abi sdk=${android.os.Build.VERSION.SDK_INT} model=${android.os.Build.MODEL} mem=${freeMb}/${totalMb}MB max=${maxMb}MB")
++        } catch (e: Throwable) {
++            nativeTrace(reactContext, "init.0a.sysinfo.err", e.message ?: "?")
++        }
++
++        // 1. Build AudioPlayer instance (no AudioTrack yet)
++        nativeTrace(reactContext, "init.1.audioplayer.new", "sr=${sampleRate.toInt()} ch=$channels")
++        try {
++            realTimeAudioPlayer = AudioPlayer(sampleRate.toInt(), channels, object : AudioPlayerDelegate {
++                override fun didUpdateVolume(volume: Float) {
++                    sendVolumeUpdate(volume)
++                    if (volume == -1f) {
++                        if (stopping) return
++                        val p = pendingPromise
++                        pendingPromise = null
++                        p?.resolve("Playback finished")
++                    }
++                }
++            })
++            nativeTrace(reactContext, "init.1.audioplayer.new.ok", "instance=${realTimeAudioPlayer != null}")
++        } catch (e: Throwable) {
++            nativeTrace(reactContext, "init.1.audioplayer.new.THREW", "${e.javaClass.simpleName}: ${e.message}")
++            throw e
++        }
++
++        // 2. Parse JSON paths
++        nativeTrace(reactContext, "init.2.json.parse", "input=${modelId.take(120)}")
++        val modelPath: String
++        val tokensPath: String
++        val dataDirPath: String
++        try {
++            val jsonObject = JSONObject(modelId)
++            modelPath = jsonObject.getString("modelPath")
++            tokensPath = jsonObject.getString("tokensPath")
++            dataDirPath = jsonObject.getString("dataDirPath")
++            nativeTrace(reactContext, "init.2.json.parse.ok",
++                "modelPath=$modelPath tokensPath=$tokensPath dataDirPath=$dataDirPath")
++        } catch (e: Throwable) {
++            nativeTrace(reactContext, "init.2.json.parse.THREW", "${e.javaClass.simpleName}: ${e.message}")
++            throw e
++        }
++
++        // 3a. Verify model file
++        nativeTrace(reactContext, "init.3a.model.check", "path=$modelPath")
++        try {
++            val mf = File(modelPath)
++            if (!mf.exists()) {
++                nativeTrace(reactContext, "init.3a.model.check.FAIL", "file does not exist")
++                throw IllegalStateException("Model file missing: $modelPath")
++            }
++            if (!mf.canRead()) {
++                nativeTrace(reactContext, "init.3a.model.check.FAIL", "file not readable")
++                throw IllegalStateException("Model file not readable: $modelPath")
++            }
++            val size = mf.length()
++            if (size == 0L) {
++                nativeTrace(reactContext, "init.3a.model.check.FAIL", "file is 0 bytes")
++                throw IllegalStateException("Model file is 0 bytes: $modelPath")
++            }
++            val head = ByteArray(16)
++            mf.inputStream().use { it.read(head) }
++            val hex = head.joinToString(" ") { "%02x".format(it.toInt() and 0xff) }
++            nativeTrace(reactContext, "init.3a.model.check.ok", "size=${size}B head=$hex")
++            if (head[0].toInt() != 0x08) {
++                nativeTrace(reactContext, "init.3a.model.check.WARN", "first byte != 0x08")
++            }
++        } catch (e: Throwable) {
++            nativeTrace(reactContext, "init.3a.model.check.THREW", "${e.javaClass.simpleName}: ${e.message}")
++            throw e
++        }
  
+-                if (volume == -1f) {
+-                    if (stopping) return  // ignore completion emitted by stopPlayer()
++        // 3b. Verify tokens file
++        nativeTrace(reactContext, "init.3b.tokens.check", "path=$tokensPath")
++        try {
++            val tf = File(tokensPath)
++            if (!tf.exists()) throw IllegalStateException("Tokens file missing: $tokensPath")
++            if (!tf.canRead()) throw IllegalStateException("Tokens file not readable: $tokensPath")
++            val size = tf.length()
++            if (size == 0L) throw IllegalStateException("Tokens file is 0 bytes")
++            val firstLine = tf.useLines { it.firstOrNull() ?: "" }
++            nativeTrace(reactContext, "init.3b.tokens.check.ok", "size=${size}B firstLine=\"$firstLine\"")
++        } catch (e: Throwable) {
++            nativeTrace(reactContext, "init.3b.tokens.check.THREW", "${e.javaClass.simpleName}: ${e.message}")
++            throw e
++        }
++
++        // 3c. Verify espeak-ng-data directory
++        nativeTrace(reactContext, "init.3c.espeak.check", "path=$dataDirPath")
++        try {
++            val df = File(dataDirPath)
++            if (!df.exists()) throw IllegalStateException("espeak data dir missing: $dataDirPath")
++            if (!df.isDirectory) throw IllegalStateException("espeak data is not a directory")
++            val children = df.list() ?: arrayOf()
++            if (children.isEmpty()) throw IllegalStateException("espeak data dir is empty")
++            val phontab = File(df, "phontab")
++            val phonindex = File(df, "phonindex")
++            val langs = File(df, "lang")
++            nativeTrace(reactContext, "init.3c.espeak.check.ok",
++                "files=${children.size} phontab=${phontab.exists()}(${phontab.length()}B) phonindex=${phonindex.exists()}(${phonindex.length()}B) langs=${langs.exists()}")
++            nativeTrace(reactContext, "init.3c.espeak.entries", "first10=${children.take(10).joinToString(",")}")
++        } catch (e: Throwable) {
++            nativeTrace(reactContext, "init.3c.espeak.check.THREW", "${e.javaClass.simpleName}: ${e.message}")
++            throw e
++        }
  
-         // Determine model paths based on modelId
+-                    val p = pendingPromise
+-                    pendingPromise = null
+-                    p?.resolve("Playback finished")
++        // 4. Thread count
++        val numCores = Runtime.getRuntime().availableProcessors()
++        val optimalThreads = when {
++            numCores >= 8 -> 4
++            numCores >= 6 -> 3
++            numCores >= 4 -> 2
++            else -> 1
++        }
++        nativeTrace(reactContext, "init.4.threads", "cores=$numCores -> threads=$optimalThreads")
++
++        // 5. Provider fallback xnnpack -> cpu
++        val providers = arrayOf("xnnpack", "cpu")
++        var createdTts: OfflineTts? = null
++        var lastErr = ""
++
++        for (provider in providers) {
++            nativeTrace(reactContext, "init.5.provider", "try=$provider")
++            val pT0 = System.currentTimeMillis()
++            try {
++                nativeTrace(reactContext, "init.5a.vits.build", "[$provider] noise=0.35 noiseW=0.667 length=1.0")
++                val vitsCfg = OfflineTtsVitsModelConfig(
++                    model = modelPath,
++                    tokens = tokensPath,
++                    dataDir = dataDirPath,
++                    noiseScale = 0.35f,
++                    noiseScaleW = 0.667f,
++                    lengthScale = 1.0f,
++                )
++                nativeTrace(reactContext, "init.5a.vits.build.ok", "[$provider]")
++
++                nativeTrace(reactContext, "init.5b.model.build", "[$provider] threads=$optimalThreads")
++                val modelCfg = OfflineTtsModelConfig(
++                    vits = vitsCfg,
++                    numThreads = optimalThreads,
++                    debug = false,
++                    provider = provider,
++                )
++                nativeTrace(reactContext, "init.5b.model.build.ok", "[$provider]")
++
++                nativeTrace(reactContext, "init.5c.tts.build", "[$provider] maxNumSentences=1")
++                val ttsCfg = OfflineTtsConfig(
++                    model = modelCfg,
++                    maxNumSentences = 1,
++                )
++                nativeTrace(reactContext, "init.5c.tts.build.ok", "[$provider]")
++
++                nativeTrace(reactContext, "init.5d.OfflineTts.new", "[$provider] calling JNI newFromFile()...")
++                val candidate = OfflineTts(null, ttsCfg)
++                nativeTrace(reactContext, "init.5d.OfflineTts.new.ok",
++                    "[$provider] instance created in ${System.currentTimeMillis() - pT0}ms")
++
++                nativeTrace(reactContext, "init.5e.tts.sampleRate", "[$provider] querying...")
++                val modelSr = candidate.sampleRate()
++                nativeTrace(reactContext, "init.5e.tts.sampleRate.ok", "[$provider] sr=$modelSr")
++
++                nativeTrace(reactContext, "init.5f.tts.numSpeakers", "[$provider] querying...")
++                val modelSpeakers = candidate.numSpeakers()
++                nativeTrace(reactContext, "init.5f.tts.numSpeakers.ok", "[$provider] speakers=$modelSpeakers")
++
++                nativeTrace(reactContext, "init.5g.sanity", "[$provider] generate('Hello')...")
++                val sanityStart = System.currentTimeMillis()
++                val testAudio = candidate.generate("Hello", 0, 1.0f)
++                val sanityMs = System.currentTimeMillis() - sanityStart
++                val testSize = testAudio.samples.size
++                nativeTrace(reactContext, "init.5g.sanity.ok",
++                    "[$provider] samples=$testSize outSr=${testAudio.sampleRate} in=${sanityMs}ms")
++
++                if (testSize > 0) {
++                    createdTts = candidate
++                    nativeTrace(reactContext, "init.5h.ACCEPT", "[$provider] provider chosen")
++                    break
++                } else {
++                    nativeTrace(reactContext, "init.5h.REJECT", "[$provider] 0 samples")
++                    try { candidate.release() } catch (re: Throwable) {
++                        nativeTrace(reactContext, "init.5h.release.err", "${re.javaClass.simpleName}: ${re.message}")
++                    }
+                 }
++            } catch (e: Throwable) {
++                lastErr = "${e.javaClass.simpleName}: ${e.message}"
++                val st = e.stackTrace.take(3).joinToString(" | ") { "${it.className}.${it.methodName}:${it.lineNumber}" }
++                nativeTrace(reactContext, "init.5.provider.THREW", "[$provider] $lastErr | stack=$st")
+             }
+-        })
+-
+-
+-        // Determine model paths based on modelId
 -        
 -        // val modelDirAssetPath = "models"
 -        // val modelDirInternal = reactContext.filesDir
@@ -175,85 +508,11 @@ index f76e886..df9b76a 100644
 -        // val tokensPath = File(modelDirInternal, "tokens.txt").absolutePath
 -        // val dataDirPath = File(modelDirInternal, "espeak-ng-data").absolutePath // Directory copy handled above
 -
-         val jsonObject = JSONObject(modelId)
-         val modelPath = jsonObject.getString("modelPath")
-         val tokensPath = jsonObject.getString("tokensPath")
-         val dataDirPath = jsonObject.getString("dataDirPath")
-+        nativeTrace(reactContext, "initializeTTS", "paths parsed model=$modelPath")
-+
-+        val numCores = Runtime.getRuntime().availableProcessors()
-+        val optimalThreads = when {
-+            numCores >= 8 -> 4
-+            numCores >= 6 -> 3
-+            numCores >= 4 -> 2
-+            else -> 1
-+        }
-+        nativeTrace(reactContext, "initializeTTS", "cores=$numCores threads=$optimalThreads")
-+
-+        // ── Provider fallback: xnnpack → cpu (VoxSherpa-TTS pattern) ──────
-+        // The CPU onnxruntime path can SIGSEGV in libonnxruntime.so when
-+        // running certain Piper VITS ops exported from PyTorch >= 2.1
-+        // (especially the MaskedScatter/Range ops in the dynamic posterior
-+        // encoder). XNNPACK uses a different kernel set and bypasses these
-+        // problematic paths. If xnnpack itself fails to initialize on this
-+        // device (e.g. unsupported instruction set on emulators), we fall
-+        // back to cpu. This mirrors how VoxSherpa-TTS — the k2-fsa officially
-+        // listed Android TTS app on Google Play — initializes its engine.
-+        //
-+        // VITS sampling knobs use VoxSherpa's "calmed" defaults (0.35/0.667)
-+        // instead of Piper upstream (0.667/0.8). Lower noise = more
-+        // deterministic sampling → fewer NaN tensors at runtime → reduces
-+        // SIGSEGV risk on edge cases. Audio quality difference is
-+        // imperceptible for audiobook narration.
-+        val providers = arrayOf("xnnpack", "cpu")
-+        var createdTts: OfflineTts? = null
-+        var lastErr = ""
-+
-+        for (provider in providers) {
-+            nativeTrace(reactContext, "initializeTTS", "trying provider=$provider")
-+            try {
-+                val config = OfflineTtsConfig(
-+                    model = OfflineTtsModelConfig(
-+                        vits = OfflineTtsVitsModelConfig(
-+                            model = modelPath,
-+                            tokens = tokensPath,
-+                            dataDir = dataDirPath,
-+                            noiseScale = 0.35f,
-+                            noiseScaleW = 0.667f,
-+                            lengthScale = 1.0f,
-+                        ),
-+                        numThreads = optimalThreads,
-+                        debug = false,
-+                        provider = provider,
-+                    ),
-+                    maxNumSentences = 1,
-+                )
-+                nativeTrace(reactContext, "initializeTTS", "[$provider] config built, calling OfflineTts()")
-+                val candidate = OfflineTts(null, config)
-+                nativeTrace(reactContext, "initializeTTS", "[$provider] OfflineTts() OK, sanity generate('Hello')")
-+                val testAudio = candidate.generate("Hello", 0, 1.0f)
-+                val testSize = testAudio.samples.size
-+                nativeTrace(reactContext, "initializeTTS", "[$provider] sanity OK samples=$testSize sr=${testAudio.sampleRate}")
-+
-+                if (testSize > 0) {
-+                    createdTts = candidate
-+                    nativeTrace(reactContext, "initializeTTS", "[$provider] ACCEPTED")
-+                    break
-+                } else {
-+                    nativeTrace(reactContext, "initializeTTS", "[$provider] REJECTED: 0 samples")
-+                    try { candidate.release() } catch (_: Throwable) {}
-+                }
-+            } catch (e: Throwable) {
-+                lastErr = "${e.javaClass.simpleName}: ${e.message}"
-+                nativeTrace(reactContext, "initializeTTS", "[$provider] THREW: $lastErr")
-+            }
-+        }
-+
-+        if (createdTts == null) {
-+            nativeTrace(reactContext, "initializeTTS", "FATAL: all providers failed lastErr=$lastErr")
-+            throw IllegalStateException("Model load failed on all providers. Last error: $lastErr")
-+        }
- 
+-        val jsonObject = JSONObject(modelId)
+-        val modelPath = jsonObject.getString("modelPath")
+-        val tokensPath = jsonObject.getString("tokensPath")
+-        val dataDirPath = jsonObject.getString("dataDirPath")
+-
 -        // Build OfflineTtsConfig using the helper function
 -        val config = OfflineTtsConfig(
 -            model=OfflineTtsModelConfig(
@@ -269,18 +528,31 @@ index f76e886..df9b76a 100644
 -
 -        // Initialize sherpa-onnx offline TTS
 -        tts = OfflineTts(config=config)
-+        tts = createdTts
-+        nativeTrace(reactContext, "initializeTTS", "tts assigned, starting AudioPlayer")
- 
-         // Start the audio player
+-
+-        // Start the audio player
 -        realTimeAudioPlayer?.start()
++        }
++
++        if (createdTts == null) {
++            nativeTrace(reactContext, "init.5.FATAL", "all providers failed lastErr=$lastErr")
++            throw IllegalStateException("Model load failed on all providers. Last error: $lastErr")
++        }
++
++        tts = createdTts
++        nativeTrace(reactContext, "init.6.tts.assigned", "ok")
++
++        nativeTrace(reactContext, "init.7.audioplayer.start", "calling AudioPlayer.start()...")
 +        try {
 +            realTimeAudioPlayer?.start()
-+            nativeTrace(reactContext, "initializeTTS", "audioPlayer.start() OK")
++            nativeTrace(reactContext, "init.7.audioplayer.start.ok", "AudioTrack initialized & playing")
 +        } catch (e: Throwable) {
-+            nativeTrace(reactContext, "initializeTTS", "audioPlayer.start() THREW: ${e.javaClass.simpleName}: ${e.message}")
++            nativeTrace(reactContext, "init.7.audioplayer.start.THREW",
++                "${e.javaClass.simpleName}: ${e.message}")
 +            throw e
 +        }
++
++        val totalMs = System.currentTimeMillis() - t0
++        nativeTrace(reactContext, "init.8.DONE", "TTS engine fully ready in ${totalMs}ms")
      }
  
      // Generate and Play method exposed to React Native
@@ -293,7 +565,7 @@ index f76e886..df9b76a 100644
              promise.reject("EMPTY_TEXT", "Input text is empty")
              return
          }
-@@ -155,6 +233,7 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -155,6 +354,7 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
          val player = realTimeAudioPlayer
          val engine = tts
          if (player == null || engine == null) {
@@ -301,7 +573,7 @@ index f76e886..df9b76a 100644
              promise.reject("NOT_INITIALIZED", "TTS is not initialized")
              return
          }
-@@ -167,18 +246,29 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -167,18 +367,29 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
          val playbackId = playbackSeq
          activePlaybackId = playbackId
  
@@ -336,7 +608,7 @@ index f76e886..df9b76a 100644
              pendingPromise = null
              promise.reject("GENERATION_ERROR", "Error during audio generation: ${e.message}")
          }
-@@ -290,17 +380,26 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -290,17 +501,26 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
      }
  
      private fun generateAudio(text: String, sid: Int, speed: Float) {

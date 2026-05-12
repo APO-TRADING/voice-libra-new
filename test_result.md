@@ -133,24 +133,41 @@ frontend:
       - working: "NA"
         agent: "main"
         comment: |
-          v2 patch (current): MAJOR redesign based on VoxSherpa-TTS reference
-          (k2-fsa officially listed Android app on Google Play, proven Piper
-          working). Changes:
-          (1) Upgraded JitPack 1.12.15 → 1.12.26 (latest May 2026)
-          (2) Provider fallback: try "xnnpack" first, then "cpu" — XNNPACK uses
-              completely different kernels that bypass the buggy CPU codepath
-              causing SIGSEGV in onnxruntime VITS inference
-          (3) Switched VITS sampling to VoxSherpa "calmed" defaults
-              noiseScale=0.35f (was 0.667), noiseScaleW=0.667f (was 0.8) —
-              lower noise = fewer NaN tensors during sampling
-          (4) Sanity check generate("Hello") inside fallback loop — only
-              accept the provider that successfully synthesizes > 0 samples
-          (5) maxNumSentences=1 (we already pass single sentences)
-          (6) Granular [native] nativeTrace logging to piper-trace.log at
-              every JNI step for crash diagnostics
-          Waiting on user to: cd frontend && npx expo prebuild --clean &&
-          eas build --platform android --profile preview --clear-cache
-          and provide DIAGNOSTICA PIPER trace after launch.
+          v3 patch (current): ULTRA-DETAILED INSTRUMENTATION on top of v2.
+          Every single sub-step of TTS init is now logged with a unique
+          [native]/[audio] tag visible in the Diagnostics panel. If the JNI
+          crashes, the user can pinpoint EXACTLY which Kotlin line died.
+          Specific instrumentation added:
+          - init.0.enter, init.0a.sysinfo (ABI, SDK, model, memory)
+          - init.1.audioplayer.new(.ok|.THREW)
+          - init.2.json.parse(.ok|.THREW)
+          - init.3a.model.check (exists/readable/size/ONNX magic bytes hex)
+          - init.3b.tokens.check (exists/readable/size/firstLine)
+          - init.3c.espeak.check (entries count, phontab/phonindex presence)
+          - init.4.threads (CPU cores -> optimal thread count)
+          - init.5.provider per provider with sub-steps:
+            * init.5a.vits.build (.ok)
+            * init.5b.model.build (.ok)
+            * init.5c.tts.build (.ok)
+            * init.5d.OfflineTts.new (.ok | .THREW with stack trace)
+            * init.5e.tts.sampleRate (.ok)
+            * init.5f.tts.numSpeakers (.ok)
+            * init.5g.sanity generate("Hello") (.ok with samples + sr + ms)
+            * init.5h.ACCEPT/REJECT
+          - init.7.audioplayer.start (.ok | .THREW)
+          - init.8.DONE with total elapsed ms
+          - [audio] start.enter/config/buffer/builder/play/play.ok
+          - [audio] playback.thread.enter/chunk.take/chunk.write
+          - JS side adds matching [js] sysinfo dump, ==PHASE.N== markers,
+            espeak.read.b64/decode/unzip progress, ONNX magic bytes check.
+          - New runFullDiagnostics() exported function for Settings panel:
+            performs 10 file-integrity checks (Platform, Device, NativeModule,
+            DestDir, Model, OnnxMagic, Tokens, EspeakDir, EspeakFiles,
+            TraceFile, EngineState) WITHOUT triggering native TTS init —
+            useful to confirm asset extraction before risking a crash.
+          - Settings UI shows colored ✓/✗ indicator per diagnostic step.
+          Total: 89 trace points in native patch, 49 init.N.* steps.
+          Patch file: 640 lines, 3 files modified.
 
 metadata:
   created_by: "main_agent"

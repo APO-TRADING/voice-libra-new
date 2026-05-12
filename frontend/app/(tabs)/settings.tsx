@@ -1,9 +1,17 @@
 import Slider from '@react-native-community/slider';
-import { Check, Copy, Cpu, Mic, Moon, RefreshCw, Sun } from 'lucide-react-native';
+import { AlertCircle, Check, Copy, Cpu, Mic, Moon, Play, RefreshCw, Sun, X } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
 import { Alert, Clipboard, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { clearPiperTrace, initEngine, isPiperReady, readPiperTrace, speakSentence } from '../../src/audio/piperEngine';
+import {
+  clearPiperTrace,
+  DiagnosticItem,
+  initEngine,
+  isPiperReady,
+  readPiperTrace,
+  runFullDiagnostics,
+  speakSentence,
+} from '../../src/audio/piperEngine';
 import { usePlayer } from '../../src/contexts/PlayerContext';
 import { useTheme } from '../../src/contexts/ThemeContext';
 
@@ -12,6 +20,8 @@ export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const { engine, piperError, piperStep } = usePlayer();
   const [trace, setTrace] = useState<string>('(caricamento...)');
+  const [diagResults, setDiagResults] = useState<DiagnosticItem[] | null>(null);
+  const [diagRunning, setDiagRunning] = useState(false);
 
   const refreshTrace = useCallback(async () => {
     const t = await readPiperTrace();
@@ -28,6 +38,19 @@ export default function SettingsScreen() {
       Alert.alert('Trace', trace);
     }
   };
+
+  const runDiag = useCallback(async () => {
+    setDiagRunning(true);
+    try {
+      const r = await runFullDiagnostics();
+      setDiagResults(r);
+    } catch (e: any) {
+      Alert.alert('Diagnostica errore', String(e?.message || e));
+    } finally {
+      setDiagRunning(false);
+      refreshTrace();
+    }
+  }, [refreshTrace]);
 
   const piperReady = engine === 'piper';
 
@@ -134,6 +157,65 @@ export default function SettingsScreen() {
           <Text style={[styles.rowMeta, { color: colors.textSecondary, marginBottom: 8 }]}>
             Log persistente del motore TTS. Sopravvive ai crash. Apri qui dopo che l'app si chiude e copia il contenuto.
           </Text>
+
+          {/* ─── Verifica integrità file (colored indicators) ─── */}
+          <View style={{ marginBottom: 12 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <Text style={[styles.rowTitle, { color: colors.textPrimary, fontSize: 13 }]}>
+                Verifica integrità file
+              </Text>
+              <TouchableOpacity
+                onPress={runDiag}
+                disabled={diagRunning}
+                style={[styles.toggleBtn, { borderColor: colors.primaryActive, paddingHorizontal: 12, flexDirection: 'row', gap: 6, opacity: diagRunning ? 0.5 : 1 }]}
+              >
+                <Play color={colors.primaryActive} size={12} />
+                <Text style={[styles.toggleLabel, { color: colors.primaryActive, fontSize: 12 }]}>
+                  {diagRunning ? 'Verifica…' : 'Verifica'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+            {diagResults ? (
+              <View style={{ backgroundColor: colors.surface2, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}>
+                {diagResults.map((d, i) => (
+                  <View
+                    key={i}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'flex-start',
+                      paddingVertical: 6,
+                      borderBottomWidth: i < diagResults.length - 1 ? 1 : 0,
+                      borderBottomColor: colors.border,
+                    }}
+                  >
+                    <View style={{ width: 20, marginTop: 1, alignItems: 'center' }}>
+                      {d.ok ? (
+                        <Check color="#22c55e" size={14} />
+                      ) : (
+                        <X color="#ef4444" size={14} />
+                      )}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: colors.textPrimary, fontSize: 12, fontWeight: '600' }}>
+                        {d.name}
+                      </Text>
+                      <Text style={{ color: colors.textSecondary, fontSize: 10.5, fontFamily: 'monospace', marginTop: 1 }} selectable>
+                        {d.detail}
+                      </Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6 }}>
+                <AlertCircle color={colors.textSecondary} size={12} />
+                <Text style={{ color: colors.textSecondary, fontSize: 11 }}>
+                  Tocca &quot;Verifica&quot; per controllare tutti i file Piper.
+                </Text>
+              </View>
+            )}
+          </View>
+
           <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
             <TouchableOpacity
               onPress={refreshTrace}
@@ -176,11 +258,14 @@ export default function SettingsScreen() {
               <Text style={[styles.toggleLabel, { color: colors.primaryActive }]}>Test voce</Text>
             </TouchableOpacity>
           </View>
+          <Text style={[styles.rowMeta, { color: colors.textSecondary, marginBottom: 6 }]}>
+            Trace dettagliato (JS + nativo). Le righe `[native]` e `[audio]` vengono dal Kotlin JNI.
+          </Text>
           <ScrollView
-            style={{ maxHeight: 280, backgroundColor: colors.surface2, borderRadius: 8, padding: 10 }}
+            style={{ maxHeight: 360, backgroundColor: colors.surface2, borderRadius: 8, padding: 10 }}
             nestedScrollEnabled
           >
-            <Text selectable style={{ color: colors.textPrimary, fontSize: 11, fontFamily: 'monospace' }}>
+            <Text selectable style={{ color: colors.textPrimary, fontSize: 10.5, fontFamily: 'monospace', lineHeight: 14 }}>
               {trace}
             </Text>
           </ScrollView>
