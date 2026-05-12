@@ -247,6 +247,66 @@ export function isPiperReady(): boolean {
   return ready;
 }
 
+// Sanitize a sentence before sending to Sherpa-ONNX.
+//
+// The Kotlin wrapper (react-native-sherpa-onnx-offline-tts 0.2.6) does a
+// blind splitText(text, 15 words) and appends "." to every chunk — which
+// creates malformed sequences like ",." that crash espeak-ng's phonemizer
+// at the JNI layer (no recoverable exception, app gets SIGKILL'd).
+//
+// To avoid hitting that code path:
+//   1) Split the sentence ourselves into ≤12-word chunks (below the wrapper's
+//      15-word threshold so it produces exactly one chunk per chunk we pass).
+//   2) Prefer breaking at `; :` > `,` > word boundary.
+//   3) Strip any trailing punctuation so the wrapper's "." append is clean.
+//   4) Normalize tricky characters that confuse espeak: hyphens inside
+//      words, em-dashes, multiple spaces, non-printable chars.
+function sanitizeForPiper(raw: string): string[] {
+  let text = raw
+    // Hyphens between letters (e.g. "re-in-attesa") → spaces
+    .replace(/(\p{L})-(\p{L})/gu, '$1 $2')
+    // Em/en dashes → comma
+    .replace(/[—–]/g, ',')
+    // Collapse multiple punctuation marks (",,", ",.", ".," etc.) to a single one
+    .replace(/([,.;:!?])\1+/g, '$1')
+    .replace(/[,;:]\s*\./g, '.')
+    .replace(/\.\s*[,;:]/g, '.')
+    // Drop non-printable / control chars
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    // Collapse whitespace
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!text) return [];
+
+  // Split into ≤12-word chunks preferring natural punctuation breaks.
+  const MAX_WORDS = 12;
+  const chunks: string[] = [];
+  const words = text.split(' ').filter(Boolean);
+
+  let i = 0;
+  while (i < words.length) {
+    const end = Math.min(i + MAX_WORDS, words.length);
+    // Look backwards from `end` for a "soft break" — punctuation we can cut on
+    let cut = -1;
+    for (let j = end - 1; j > i; j--) {
+      const w = words[j];
+      const last = w.slice(-1);
+      if (last === ';' || last === ':' || last === ',' || last === '.' || last === '!' || last === '?') {
+        cut = j + 1; // include the punctuated word
+        break;
+      }
+    }
+    const stop = (cut > 0 && cut > i + 3) ? cut : end;
+    let chunk = words.slice(i, stop).join(' ');
+    // Strip any trailing punctuation so the wrapper's "." append is clean.
+    chunk = chunk.replace(/[,.;:!?]+$/, '').trim();
+    if (chunk) chunks.push(chunk);
+    i = stop;
+  }
+  return chunks;
+}
+
 export async function speakSentence(text: string, lengthScale: number): Promise<void> {
   const tts = getSherpaTTS();
   if (!tts || !ready) {
@@ -254,15 +314,22 @@ export async function speakSentence(text: string, lengthScale: number): Promise<
     throw new Error('Piper not available');
   }
   const speed = Math.max(0.5, Math.min(2.0, 1 / lengthScale));
-  // Truncate preview & strip newlines so the trace log stays single-line.
-  const preview = text.slice(0, 80).replace(/\s+/g, ' ');
-  try {
-    await trace('speak-start', `len=${text.length} speed=${speed.toFixed(2)} preview="${preview}"`);
-    await tts.generateAndPlay(text, 0, speed);
-    await trace('speak-end', 'OK');
-  } catch (e: any) {
-    await trace('speak-error', `${e?.message || String(e)}`);
-    throw e;
+  const chunks = sanitizeForPiper(text);
+  if (!chunks.length) {
+    await trace('speak-skip', 'empty after sanitize');
+    return;
+  }
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const preview = chunk.slice(0, 80);
+    try {
+      await trace('speak-start', `${i + 1}/${chunks.length} len=${chunk.length} speed=${speed.toFixed(2)} preview="${preview}"`);
+      await tts.generateAndPlay(chunk, 0, speed);
+      await trace('speak-end', `${i + 1}/${chunks.length} OK`);
+    } catch (e: any) {
+      await trace('speak-error', `${i + 1}/${chunks.length}: ${e?.message || String(e)}`);
+      throw e;
+    }
   }
 }
 
