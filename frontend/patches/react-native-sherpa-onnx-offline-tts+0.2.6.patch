@@ -38,10 +38,10 @@ index f2fd70a..9c6c9c1 100644
  
  
 diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt
-index 4fdaf4a..342d256 100644
+index 4fdaf4a..b0078f2 100644
 --- a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt
 +++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt
-@@ -1,14 +1,36 @@
+@@ -1,14 +1,37 @@
  package com.sherpaonnxofflinetts
  
 +import android.content.Context
@@ -54,6 +54,7 @@ index 4fdaf4a..342d256 100644
 +import java.io.File
 +import java.io.FileWriter
  import java.util.concurrent.LinkedBlockingQueue
++import java.util.concurrent.atomic.AtomicInteger
  import kotlin.math.abs
  
 +// Static trace helper — wired from TTSManagerModule.init {} so it writes
@@ -78,7 +79,45 @@ index 4fdaf4a..342d256 100644
  class AudioPlayer(
      private val sampleRate: Int,
      private val channels: Int,
-@@ -54,68 +76,136 @@ class AudioPlayer(
+@@ -17,12 +40,35 @@ class AudioPlayer(
+     private var audioTrack: AudioTrack? = null
+     private val audioQueue = LinkedBlockingQueue<FloatArray>()
+     @Volatile private var isRunning = false
+-    @Volatile private var sentCompletion = false          // ← NEW
++    @Volatile private var sentCompletion = false
+     @Volatile private var enqueueClosed = true
+     @Volatile private var didSignalFinish = false
+     @Volatile private var playbackId: Int = 0
+-    @Volatile private var pendingWrites = 0
+ 
++    // PATCH (beppe-audiobooks v5): use AtomicInteger for thread-safe
++    // counter access. `@Volatile var` with `++` / `--` is NOT atomic and
++    // caused the race condition where maybeSendCompletion() could see
++    // pendingWrites==0 while a chunk was in transit between take() and
++    // pendingWrites.incrementAndGet().
++    private val pendingWrites = AtomicInteger(0)
++    private val pendingChunks = AtomicInteger(0)
++
++    // PATCH (beppe-audiobooks v5): track total frames written cumulatively
++    // since the last AudioTrack.flush()/play(). Used together with
++    // AudioTrack.getPlaybackHeadPosition() to detect WHEN the AudioTrack
++    // internal buffer has actually drained — NOT just when our queue is empty.
++    // This is the SOURCE OF TRUTH for "playback is finished":
++    //   getPlaybackHeadPosition() >= totalFramesWritten  →  finished
++    // The previous implementation emitted didUpdateVolume(-1f) the instant
++    // pendingWrites reached 0, which is when the bytes were COPIED into the
++    // AudioTrack ring buffer — not when they were PLAYED. For a typical
++    // sentence (~400-2000ms audio), this fired the JS-side promise ~50ms
++    // early. JS then called generateAndPlay() for the next sentence, which
++    // triggered beginPlayback() → audioQueue.clear() / counter reset → the
++    // tail of the previous sentence got chopped and the playback thread
++    // saw a fresh queue with stale state. After 2-3 sentences the engine
++    // entered a half-stuck state and JS fell back to the device TTS.
++    @Volatile private var totalFramesWritten: Long = 0L
+ 
+     private var playbackThread: Thread? = null
+ 
+@@ -54,68 +100,149 @@ class AudioPlayer(
      }
  
      fun start() {
@@ -92,12 +131,20 @@ index 4fdaf4a..342d256 100644
              AudioFormat.CHANNEL_OUT_MONO
          else
              AudioFormat.CHANNEL_OUT_STEREO
+-
+-        val desiredBufferDurationMs = 20
 +        AudioPlayerTrace.log("start.config", "channelConfig=$channelConfig")
- 
++
 +        // PATCH (beppe-audiobooks): swap PCM_FLOAT -> PCM_16BIT.
 +        val encoding = AudioFormat.ENCODING_PCM_16BIT
 +        val bytesPerSample = 2
-         val desiredBufferDurationMs = 20
++        // PATCH (beppe-audiobooks v5): bump intended buffer from 20ms -> 200ms.
++        // A 20ms buffer at 16kHz mono is only 640 bytes — too small. With a
++        // larger ring buffer, AudioTrack tolerates short stalls in the
++        // playback thread without underrunning (which would otherwise emit a
++        // silent gap or stop playback). 200ms is still small enough that
++        // pause/stop reacts perceptually instantly to the user.
++        val desiredBufferDurationMs = 200
          val bufferSizeInSamples = (sampleRate * desiredBufferDurationMs) / 1000
 -        val bufferSizeInBytes = bufferSizeInSamples * 4 * channels
 +        val bufferSizeInBytes = bufferSizeInSamples * bytesPerSample * channels
@@ -201,6 +248,9 @@ index 4fdaf4a..342d256 100644
                          accumulationBuffer.addAll(samples.asList())
                          processAccumulatedSamples()
                      }
+-                    pendingWrites += 1
+-                    audioTrack?.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
+-                    pendingWrites -= 1
 +                    val shortSamples = ShortArray(samples.size)
 +                    for (i in samples.indices) {
 +                        val v = samples[i]
@@ -211,16 +261,22 @@ index 4fdaf4a..342d256 100644
 +                        }
 +                        shortSamples[i] = (clipped * 32767.0f).toInt().toShort()
 +                    }
-                     pendingWrites += 1
--                    audioTrack?.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
++                    pendingWrites.incrementAndGet()
 +                    val written = audioTrack?.write(shortSamples, 0, shortSamples.size, AudioTrack.WRITE_BLOCKING) ?: -1
++                    if (written > 0) {
++                        // AudioTrack.write returns shorts written. For mono, shorts == frames.
++                        // For stereo, shorts == frames * 2. Divide by channels to get frames.
++                        totalFramesWritten += (written / channels).toLong()
++                    }
 +                    if (chunkCount <= 3 || chunkCount % 50 == 0) {
-+                        AudioPlayerTrace.log("playback.chunk.write", "chunk#$chunkCount wrote=$written/${shortSamples.size}")
++                        AudioPlayerTrace.log("playback.chunk.write",
++                            "chunk#$chunkCount wrote=$written/${shortSamples.size} totalFrames=$totalFramesWritten")
 +                    }
 +                    if (written < 0) {
 +                        AudioPlayerTrace.log("playback.chunk.write.ERR", "chunk#$chunkCount returned=$written")
 +                    }
-                     pendingWrites -= 1
++                    pendingWrites.decrementAndGet()
++                    pendingChunks.decrementAndGet()
                      maybeSendCompletion()
                  } catch (e: InterruptedException) {
 +                    AudioPlayerTrace.log("playback.thread.interrupted", "exiting")
@@ -239,8 +295,256 @@ index 4fdaf4a..342d256 100644
      }
  
      private fun processAccumulatedSamples() {
+@@ -134,6 +261,10 @@ class AudioPlayer(
+         sentCompletion = false
+         didSignalFinish = false
+         enqueueClosed = false
++        // CRITICAL (atomic): increment BEFORE offer so the playback thread
++        // can never see an empty queue + pendingChunks==0 in a window where
++        // the chunk is "in flight" from JS bridge to LinkedBlockingQueue.
++        pendingChunks.incrementAndGet()
+         audioQueue.offer(samples)
+     }
+ 
+@@ -146,27 +277,104 @@ class AudioPlayer(
+         return maxVal
+     }
+ 
+-    // Completion helper
++    // PATCH (beppe-audiobooks v5): completion detection now waits for the
++    // AudioTrack INTERNAL ring buffer to actually drain, not just for our
++    // upstream queue+counter to hit zero. This fixes the "stops after 2
++    // sentences" bug: previously, didUpdateVolume(-1f) fired the moment
++    // AudioTrack.write() returned, which happens when the bytes are copied
++    // into the ring buffer — typically 50-200ms BEFORE the user actually
++    // hears them. JS would then race ahead, call generateAndPlay() for the
++    // next sentence, which reset pendingWrites=0 / cleared the queue (in
++    // beginPlayback), chopping the tail of the previous sentence and
++    // putting the engine into a stuck state after 2-3 sentences.
+     private fun maybeSendCompletion() {
+         if (didSignalFinish) return
+ 
+         val finished =
+             enqueueClosed &&
+             audioQueue.isEmpty() &&
+-            pendingWrites == 0
++            pendingChunks.get() == 0 &&
++            pendingWrites.get() == 0
+ 
+-        if (finished) {
+-            didSignalFinish = true
+-            sentCompletion = true
++        if (!finished) return
+ 
+-            // cleanup (optional but good)
+-            synchronized(this) {
+-                accumulationBuffer.clear()
+-                volumesQueue.clear()
+-            }
++        // Schedule the actual drain check on the main thread. If the
++        // AudioTrack ring buffer still has unplayed samples, we re-post
++        // ourselves a few ms later. This loop terminates as soon as the
++        // playback head reaches totalFramesWritten OR after a safety cap.
++        mainHandler.post { checkDrainAndFinish(deadlineMs = System.currentTimeMillis() + 5000L) }
++    }
+ 
+-            mainHandler.post { delegate?.didUpdateVolume(-1f) }
++    private fun checkDrainAndFinish(deadlineMs: Long) {
++        if (didSignalFinish) return
++
++        // Re-verify the upstream is still drained — JS might have enqueued
++        // a new chunk between the schedule and now (legitimate concurrent
++        // playback continuation: same engine, next sentence pre-queued).
++        // If so, abandon completion: a fresh maybeSendCompletion will fire
++        // later when the new chunks finish.
++        if (!enqueueClosed || pendingChunks.get() > 0 || pendingWrites.get() > 0 || !audioQueue.isEmpty()) {
++            AudioPlayerTrace.log("completion.abort",
++                "new audio enqueued during drain wait, pending=${pendingChunks.get()}")
++            return
++        }
++
++        val track = audioTrack
++        if (track == null || track.state != AudioTrack.STATE_INITIALIZED) {
++            // Track gone? Just signal completion.
++            finalizeCompletion("no-track")
++            return
++        }
++
++        val head = try {
++            // AudioTrack.getPlaybackHeadPosition() returns frames played
++            // since last play()/flush() as a 32-bit unsigned int wrapped
++            // in a Kotlin Int. Mask to long for safe comparison.
++            (track.playbackHeadPosition.toLong()) and 0xFFFFFFFFL
++        } catch (e: Throwable) {
++            AudioPlayerTrace.log("completion.head.err", "${e.javaClass.simpleName}: ${e.message}")
++            // On error, assume drained to avoid hanging the engine.
++            finalizeCompletion("head-error")
++            return
++        }
++        val written = totalFramesWritten
++
++        if (head >= written) {
++            finalizeCompletion("drained head=$head written=$written")
++            return
++        }
++
++        // Still draining. Estimate remaining time in ms and re-check.
++        val remaining = (written - head).coerceAtLeast(1L)
++        val msRemaining = ((remaining.toDouble() / sampleRate.toDouble()) * 1000.0).toLong()
++            .coerceAtLeast(20L)
++            .coerceAtMost(300L)
++
++        if (System.currentTimeMillis() + msRemaining > deadlineMs) {
++            // Safety cap: never wait more than the deadline (5s). At that
++            // point assume the device's playback head reporting is broken
++            // and just signal completion. Better a short truncation than
++            // an indefinite hang.
++            AudioPlayerTrace.log("completion.deadline",
++                "head=$head written=$written remaining=$remaining giving up wait")
++            finalizeCompletion("deadline")
++            return
++        }
++
++        mainHandler.postDelayed({ checkDrainAndFinish(deadlineMs) }, msRemaining)
++    }
++
++    private fun finalizeCompletion(reason: String) {
++        if (didSignalFinish) return
++        didSignalFinish = true
++        sentCompletion = true
++        AudioPlayerTrace.log("completion.signal", "reason=$reason totalFrames=$totalFramesWritten")
++
++        synchronized(this) {
++            accumulationBuffer.clear()
++            volumesQueue.clear()
+         }
++        delegate?.didUpdateVolume(-1f)
+     }
+ 
+ 
+@@ -179,32 +387,93 @@ class AudioPlayer(
+         }
+         isRunning = false
+         playbackThread?.interrupt()
+-        playbackThread?.join()
++        try { playbackThread?.join(500) } catch (_: InterruptedException) { }
+ 
+         mainHandler.removeCallbacks(volumeUpdateRunnable)
+ 
+-        audioTrack?.stop()
+-        audioTrack?.release()
++        try { audioTrack?.stop() } catch (_: Exception) { }
++        try { audioTrack?.release() } catch (_: Exception) { }
+         audioTrack = null
+ 
+         synchronized(this) {
+             accumulationBuffer.clear()
+             volumesQueue.clear()
+         }
++        audioQueue.clear()
++        pendingChunks.set(0)
++        pendingWrites.set(0)
++        totalFramesWritten = 0L
+ 
+         enqueueClosed = true
+         didSignalFinish = true
+         sentCompletion = true
+ 
+-        mainHandler.post { delegate?.didUpdateVolume(-1f) } // ← now sends -1
++        mainHandler.post { delegate?.didUpdateVolume(-1f) }
++    }
++
++    // PATCH (beppe-audiobooks v5): NEW — soft stop that PRESERVES the
++    // AudioTrack and the playback thread but flushes any pending audio.
++    // Used by the React Native layer when the user calls stopSpeak() to
++    // abort the current sentence without destroying the engine. After
++    // stopPlayback(), the next generateAndPlay() can immediately resume
++    // playback by calling beginPlayback() + enqueueAudioData().
++    fun stopPlayback() {
++        AudioPlayerTrace.log("stopPlayback.enter",
++            "isRunning=$isRunning pending=${pendingChunks.get()}")
++        if (!isRunning) {
++            // emit completion so a stale JS promise can still resolve
++            mainHandler.post { delegate?.didUpdateVolume(-1f) }
++            return
++        }
++        // Drop everything in the producer queue.
++        audioQueue.clear()
++        // Flush the AudioTrack ring buffer (pause first to avoid the
++        // hardware emitting an audible click).
++        try {
++            audioTrack?.pause()
++            audioTrack?.flush()
++            audioTrack?.play()
++        } catch (e: Throwable) {
++            AudioPlayerTrace.log("stopPlayback.flush.THREW",
++                "${e.javaClass.simpleName}: ${e.message}")
++        }
++        pendingChunks.set(0)
++        pendingWrites.set(0)
++        totalFramesWritten = 0L
++        synchronized(this) {
++            accumulationBuffer.clear()
++            volumesQueue.clear()
++        }
++        // Mark the current "playback unit" as finished so a fresh
++        // beginPlayback() starts clean.
++        enqueueClosed = true
++        if (!didSignalFinish) {
++            didSignalFinish = true
++            sentCompletion = true
++            mainHandler.post { delegate?.didUpdateVolume(-1f) }
++        }
++        AudioPlayerTrace.log("stopPlayback.exit", "ok")
+     }
+ 
+     fun beginPlayback(id: Int) {
+         playbackId = id
++        // PATCH (beppe-audiobooks v5): waitForDrain BEFORE wiping state.
++        // The original implementation was:
++        //   pendingWrites = 0
++        //   audioQueue.clear()
++        // which would chop the tail of a still-playing previous sentence
++        // (because completion was emitted prematurely — see maybeSend-
++        // Completion comment). Now, by the time beginPlayback() is called,
++        // the previous playback IS truly finished (because completion only
++        // fires after playback head drains) and clearing the queue here is
++        // a no-op. We still defensively reset the counters and clear in
++        // case stopPlayback() was used.
+         enqueueClosed = false
+         didSignalFinish = false
+         sentCompletion = false
+-        pendingWrites = 0
++        pendingWrites.set(0)
++        pendingChunks.set(0)
++        totalFramesWritten = 0L
+ 
+         audioQueue.clear()
+         synchronized(this) {
+@@ -212,6 +481,21 @@ class AudioPlayer(
+             volumesQueue.clear()
+         }
+ 
++        // Reset the AudioTrack playback head counter so totalFramesWritten
++        // starts from 0 too. flush() + play() achieves this atomically.
++        val track = audioTrack
++        if (track != null && track.state == AudioTrack.STATE_INITIALIZED) {
++            try {
++                track.pause()
++                track.flush()
++                track.play()
++                AudioPlayerTrace.log("beginPlayback.flushed", "head reset to 0")
++            } catch (e: Throwable) {
++                AudioPlayerTrace.log("beginPlayback.flush.THREW",
++                    "${e.javaClass.simpleName}: ${e.message}")
++            }
++        }
++
+         if (!isRunning) {
+             start() // starts AudioTrack + thread + volume timer
+         }
 diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
-index f76e886..b6a00fd 100644
+index f76e886..70ea0ea 100644
 --- a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
 +++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
 @@ -8,9 +8,25 @@ import kotlin.concurrent.thread
@@ -289,19 +593,7 @@ index f76e886..b6a00fd 100644
 +    // optimization). Without the promise, RN bridge runs this on the
 +    // native modules thread and JS returns immediately — leading to JS
 +    // calling speak() while the engine is still loading.
-     @ReactMethod
--    fun initializeTTS(sampleRate: Double, channels: Int, modelId: String) {
--        // Setup Audio Player
--        realTimeAudioPlayer = AudioPlayer(sampleRate.toInt(), channels, object : AudioPlayerDelegate {
--            override fun didUpdateVolume(volume: Float) {
--                sendVolumeUpdate(volume)
--
--                if (volume == -1f) {
--                    if (stopping) return  // ignore completion emitted by stopPlayer()
--
--                    val p = pendingPromise
--                    pendingPromise = null
--                    p?.resolve("Playback finished")
++    @ReactMethod
 +    fun initializeTTS(sampleRate: Double, channels: Int, modelId: String, promise: Promise) {
 +        // Run on a background thread to avoid blocking the RN bridge thread
 +        // (long model loads can ANR the bridge if blocked >5s).
@@ -318,7 +610,19 @@ index f76e886..b6a00fd 100644
 +    }
 +
 +    // Legacy entrypoint kept for backward compatibility (no promise).
-+    @ReactMethod
+     @ReactMethod
+-    fun initializeTTS(sampleRate: Double, channels: Int, modelId: String) {
+-        // Setup Audio Player
+-        realTimeAudioPlayer = AudioPlayer(sampleRate.toInt(), channels, object : AudioPlayerDelegate {
+-            override fun didUpdateVolume(volume: Float) {
+-                sendVolumeUpdate(volume)
+-
+-                if (volume == -1f) {
+-                    if (stopping) return  // ignore completion emitted by stopPlayer()
+-
+-                    val p = pendingPromise
+-                    pendingPromise = null
+-                    p?.resolve("Playback finished")
 +    fun initializeTTSLegacy(sampleRate: Double, channels: Int, modelId: String) {
 +        try {
 +            doInitializeTTS(sampleRate, channels, modelId)
@@ -362,7 +666,7 @@ index f76e886..b6a00fd 100644
 +                        pendingPromise = null
 +                        p?.resolve("Playback finished")
 +                    }
-+                }
+                 }
 +            })
 +            nativeTrace(reactContext, "init.1.audioplayer.new.ok", "instance=${realTimeAudioPlayer != null}")
 +        } catch (e: Throwable) {
@@ -410,7 +714,42 @@ index f76e886..b6a00fd 100644
 +            nativeTrace(reactContext, "init.3a.model.check.ok", "size=${size}B head=$hex")
 +            if (head[0].toInt() != 0x08) {
 +                nativeTrace(reactContext, "init.3a.model.check.WARN", "first byte != 0x08")
-+            }
+             }
+-        })
+-
+-
+-        // Determine model paths based on modelId
+-        
+-        // val modelDirAssetPath = "models"
+-        // val modelDirInternal = reactContext.filesDir
+-        // modelLoader.copyAssetDirectory(modelDirAssetPath, modelDirInternal)
+-        // val modelPath = File(modelDirInternal, if (modelId.lowercase() == "male") "en_US-ryan-medium.onnx" else "en_US-hfc_female-medium.onnx").absolutePath
+-        // val tokensPath = File(modelDirInternal, "tokens.txt").absolutePath
+-        // val dataDirPath = File(modelDirInternal, "espeak-ng-data").absolutePath // Directory copy handled above
+-
+-        val jsonObject = JSONObject(modelId)
+-        val modelPath = jsonObject.getString("modelPath")
+-        val tokensPath = jsonObject.getString("tokensPath")
+-        val dataDirPath = jsonObject.getString("dataDirPath")
+-
+-        // Build OfflineTtsConfig using the helper function
+-        val config = OfflineTtsConfig(
+-            model=OfflineTtsModelConfig(
+-              vits=OfflineTtsVitsModelConfig(
+-                model=modelPath,
+-                tokens=tokensPath,
+-                dataDir=dataDirPath,
+-              ),
+-              numThreads=1,
+-              debug=true,
+-            )
+-          )
+-
+-        // Initialize sherpa-onnx offline TTS
+-        tts = OfflineTts(config=config)
+-
+-        // Start the audio player
+-        realTimeAudioPlayer?.start()
 +        } catch (e: Throwable) {
 +            nativeTrace(reactContext, "init.3a.model.check.THREW", "${e.javaClass.simpleName}: ${e.message}")
 +            throw e
@@ -551,47 +890,12 @@ index f76e886..b6a00fd 100644
 +                    try { candidate.release() } catch (re: Throwable) {
 +                        nativeTrace(reactContext, "init.5h.release.err", "${re.javaClass.simpleName}: ${re.message}")
 +                    }
-                 }
++                }
 +            } catch (e: Throwable) {
 +                lastErr = "${e.javaClass.simpleName}: ${e.message}"
 +                val st = e.stackTrace.take(3).joinToString(" | ") { "${it.className}.${it.methodName}:${it.lineNumber}" }
 +                nativeTrace(reactContext, "init.5.provider.THREW", "[$provider] $lastErr | stack=$st")
-             }
--        })
--
--
--        // Determine model paths based on modelId
--        
--        // val modelDirAssetPath = "models"
--        // val modelDirInternal = reactContext.filesDir
--        // modelLoader.copyAssetDirectory(modelDirAssetPath, modelDirInternal)
--        // val modelPath = File(modelDirInternal, if (modelId.lowercase() == "male") "en_US-ryan-medium.onnx" else "en_US-hfc_female-medium.onnx").absolutePath
--        // val tokensPath = File(modelDirInternal, "tokens.txt").absolutePath
--        // val dataDirPath = File(modelDirInternal, "espeak-ng-data").absolutePath // Directory copy handled above
--
--        val jsonObject = JSONObject(modelId)
--        val modelPath = jsonObject.getString("modelPath")
--        val tokensPath = jsonObject.getString("tokensPath")
--        val dataDirPath = jsonObject.getString("dataDirPath")
--
--        // Build OfflineTtsConfig using the helper function
--        val config = OfflineTtsConfig(
--            model=OfflineTtsModelConfig(
--              vits=OfflineTtsVitsModelConfig(
--                model=modelPath,
--                tokens=tokensPath,
--                dataDir=dataDirPath,
--              ),
--              numThreads=1,
--              debug=true,
--            )
--          )
--
--        // Initialize sherpa-onnx offline TTS
--        tts = OfflineTts(config=config)
--
--        // Start the audio player
--        realTimeAudioPlayer?.start()
++            }
 +        }
 +
 +        if (createdTts == null) {
@@ -669,7 +973,52 @@ index f76e886..b6a00fd 100644
              pendingPromise = null
              promise.reject("GENERATION_ERROR", "Error during audio generation: ${e.message}")
          }
-@@ -290,17 +559,26 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -203,6 +472,44 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+         stopping = false
+     }
+ 
++    // PATCH (beppe-audiobooks v5): NEW — soft stop that aborts the current
++    // sentence's playback WITHOUT destroying the TTS engine. The previous
++    // implementation only exposed deinitialize(), which released the
++    // sherpa-onnx engine + AudioTrack — and JS-side stopSpeak() then needed
++    // to re-init the engine on every pause/skip, which was racy and caused
++    // the symptom "after stop, the device fallback voice speaks". Now the
++    // JS layer can call stopPlayback() to interrupt the current sentence,
++    // and the next generateAndPlay() resumes instantly with Piper.
++    @ReactMethod
++    fun stopPlayback(promise: Promise) {
++        try {
++            stopping = true
++            // Resolve any in-flight promise as an interrupted stop so JS
++            // can move on without a dangling await.
++            pendingPromise?.resolve("Playback interrupted")
++            pendingPromise = null
++
++            realTimeAudioPlayer?.stopPlayback()
++
++            stopping = false
++            nativeTrace(reactContext, "stopPlayback", "engine preserved, audio flushed")
++            promise.resolve("OK")
++        } catch (e: Throwable) {
++            stopping = false
++            nativeTrace(reactContext, "stopPlayback.THREW",
++                "${e.javaClass.simpleName}: ${e.message}")
++            promise.reject("STOP_PLAYBACK_FAILED", e.message ?: e.javaClass.simpleName, e)
++        }
++    }
++
++    // PATCH (beppe-audiobooks v5): lightweight readiness probe exposed to JS.
++    // Useful for the diagnostics screen and for re-syncing the JS-side
++    // `ready` flag after an app foreground/background cycle.
++    @ReactMethod
++    fun isReady(promise: Promise) {
++        promise.resolve(tts != null && realTimeAudioPlayer != null)
++    }
++
+     @ReactMethod
+     fun generateAndSave(text: String, path: String?, fileType: String?, promise: Promise) {
+         val trimmed = text.trim()
+@@ -290,17 +597,26 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
      }
  
      private fun generateAudio(text: String, sid: Int, speed: Float) {

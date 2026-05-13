@@ -788,8 +788,30 @@ export async function speakSentence(text: string, lengthScale: number): Promise<
 export async function stopSpeak(): Promise<void> {
   const tts = getSherpaTTS();
   if (!tts) return;
+  // PATCH (beppe-audiobooks v5): use the NEW native stopPlayback() method
+  // which only aborts the current sentence's audio output. The previous
+  // implementation called deinitialize(), which destroyed the entire
+  // sherpa-onnx engine + AudioTrack. JS then re-initialized in the
+  // background — but a concurrent play() would race ahead and find
+  // ready=false, so the device's stock TTS spoke instead. This is the
+  // root cause of "after I press stop, the device voice comes out".
+  const native: any = (NativeModules as any).TTSManager;
+  if (native && typeof native.stopPlayback === 'function') {
+    try {
+      await trace('stop.call', 'stopPlayback (engine preserved)');
+      await native.stopPlayback();
+      await trace('stop.call', 'OK');
+    } catch (e: any) {
+      await trace('stop.call', `err: ${e?.message || e}`);
+    }
+    // CRITICAL: do NOT clear `ready` or `initPromise` here. The engine is
+    // still loaded; the next speak() can resume instantly with Piper.
+    return;
+  }
+  // Fallback path (for an older patch without stopPlayback): use the
+  // legacy hard-reset.
   try {
-    await trace('stop.call', 'deinitialize');
+    await trace('stop.call', 'deinitialize (legacy fallback)');
     await tts.deinitialize();
     await trace('stop.call', 'OK');
   } catch (e: any) {

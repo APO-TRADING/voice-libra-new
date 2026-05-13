@@ -1,5 +1,25 @@
 # 📖 Guida completa: dal clone del repo al build APK
 
+> **🆕 PATCH v5 (giugno 2025)** — Fix race condition per la lettura continua di più frasi.
+> Se hai già un APK funzionante della v4 ma la lettura si fermava dopo 2 frasi cadendo sul TTS del dispositivo, esegui SOLO questi tre comandi:
+>
+> ```bash
+> git pull
+> yarn install
+> eas build --platform android --profile preview
+> ```
+>
+> La patch viene applicata automaticamente da `postinstall: patch-package`. Per verificare che il fix sia attivo, dopo aver letto qualche frase apri **Impostazioni → Diagnostica Piper → Trace** e cerca queste righe:
+> - `[audio] completion.signal :: reason=drained head=... written=...` (la frase termina correttamente)
+> - `[audio] playback.chunk.write :: ... totalFrames=...` (counter cumulativo dei frame scritti)
+> - `[native] stopPlayback :: engine preserved` (quando premi pausa, il motore Piper resta caricato)
+>
+> Se invece compaiono `completion.signal :: reason=deadline`, significa che il dispositivo non aggiorna `getPlaybackHeadPosition()` correttamente — il fix di safety da 5s entra in azione e la riproduzione continua comunque, solo con una piccola troncatura della coda dell'ultimo chunk.
+
+---
+
+# 📖 Guida completa: dal clone del repo al build APK
+
 > Tempo totale stimato: **~45 minuti** (di cui ~25 min di build remoto su server EAS).
 > Tutto va eseguito **una volta sola** per i tool — i build successivi richiedono solo gli ultimi 3 comandi.
 

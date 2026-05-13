@@ -55,6 +55,15 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const bookIdRef = useRef<string | null>(null);
   const generationRef = useRef(0); // monotonic ID to drop stale callbacks
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // PATCH (beppe-audiobooks v5): count consecutive Piper failures. Falling
+  // back to the device TTS on every single error is too aggressive: a
+  // transient native hiccup (e.g. AudioTrack underrun) would permanently
+  // demote the engine. Only after MAX_PIPER_FAILS consecutive errors do
+  // we accept that Piper is unusable and stay on the device fallback.
+  // A successful piperSpeak resets the counter and promotes the engine
+  // back to 'piper' if it was on 'device'.
+  const piperFailCountRef = useRef(0);
+  const MAX_PIPER_FAILS = 3;
 
   useEffect(() => { indexRef.current = index; }, [index]);
   useEffect(() => { sentencesRef.current = sentences; }, [sentences]);
@@ -96,10 +105,27 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       try {
         // generateAndPlay resolves when the native player finishes the clip
         await piperSpeak(text, ls);
+        // PATCH (beppe-audiobooks v5): success → reset fail counter and
+        // promote engine back to 'piper' if we were on 'device' fallback.
+        if (piperFailCountRef.current > 0) {
+          piperFailCountRef.current = 0;
+        }
+        setEngine((prev) => (prev === 'device' ? 'piper' : prev));
         return;
       } catch (e) {
-        console.warn('[Piper] speak failed, falling back to device:', e);
-        setEngine('device');
+        piperFailCountRef.current += 1;
+        console.warn(
+          `[Piper] speak failed (${piperFailCountRef.current}/${MAX_PIPER_FAILS}), `,
+          e
+        );
+        // Only flip the engine UI label to 'device' after MAX_PIPER_FAILS
+        // consecutive errors. This avoids confusing users when a single
+        // transient native hiccup happens (e.g. AudioTrack underrun).
+        if (piperFailCountRef.current >= MAX_PIPER_FAILS) {
+          setEngine('device');
+        }
+        // Fall through to device fallback for THIS sentence; the next
+        // sentence will retry Piper from the top.
       }
     }
 
@@ -140,11 +166,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   const play = useCallback(() => {
     if (!sentencesRef.current.length) return;
+    // PATCH (beppe-audiobooks v5): reset the consecutive-fail counter on
+    // every fresh play() press so a new session always tries Piper first.
+    piperFailCountRef.current = 0;
     // Lazy init: try Piper the first time the user presses play. If it fails,
     // the catch path will keep the user on the device-TTS fallback so the app
     // never crashes here.
     stopAll().then(async () => {
-      if (engine === 'unknown') {
+      if (engine === 'unknown' || !isPiperReady()) {
         try {
           const ok = await initEngine();
           setEngine(ok ? 'piper' : 'device');

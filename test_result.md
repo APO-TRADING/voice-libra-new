@@ -163,6 +163,106 @@ frontend:
 
           Total patch v4: 701 lines, 3 files modified. Promise-based init,
           CPU-first provider, model-size-aware threads, granular trace 89+.
+          v4 confirmed by user: TTS initializes correctly and plays the first
+          sentence cleanly with the riccardo-x_low 16kHz model. PROBLEM
+          REMAINING: playback stops after exactly 2 sentences and then on
+          replay the device's stock TTS speaks instead of Piper.
+      - working: "NA"
+        agent: "main"
+        comment: |
+          v5 patch (current) — RACE CONDITION FIX for "stops after 2 sentences":
+
+          ROOT CAUSE ANALYSIS (from user-supplied trace):
+            speak.start emitted at T+0ms, audio reasonably long (~400ms)
+            speak.end resolves at T+1ms — WAY too early.
+          The premature speak.end caused the JS playLoop to immediately call
+          generateAndPlay() for the next sentence, which invokes
+          beginPlayback() → audioQueue.clear() + pendingWrites=0 reset.
+          The playback thread was still mid-write on the previous sentence's
+          tail samples, so the AudioTrack ring buffer underran. After 2-3
+          sentences the engine entered a half-stuck state, the next
+          piperSpeak() rejected, and JS-side `setEngine('device')` permanently
+          demoted the engine.
+
+          A SECOND independent bug: piperEngine.stopSpeak() was calling
+          tts.deinitialize() — which RELEASES the entire sherpa-onnx OfflineTts
+          instance and the AudioTrack. The follow-up initEngine() runs in the
+          background, but a concurrent play() finds ready=false and the
+          speakOne() path falls through to expo-speech (the device's stock TTS).
+          This is why the user reported "when I press play again, the device's
+          voice speaks, not Piper".
+
+          v5 FIXES applied (3 files modified, patch grew 701 → 1050 lines):
+
+          (A) AudioPlayer.kt — proper completion detection
+              • pendingChunks / pendingWrites are now AtomicInteger (was
+                @Volatile var with non-atomic ++/-- — itself a race).
+              • Track totalFramesWritten cumulatively in the playback thread.
+              • maybeSendCompletion() no longer fires didUpdateVolume(-1f)
+                immediately when the queue is empty. Instead it posts a
+                checkDrainAndFinish() runnable to the main thread that
+                compares AudioTrack.getPlaybackHeadPosition() against
+                totalFramesWritten. The -1f signal is only emitted once the
+                playback head catches up (i.e. the user has actually heard
+                every written frame). Has a 5s deadline cap as safety.
+              • Bumped intended buffer 20ms → 200ms so AudioTrack tolerates
+                short stalls in the playback thread without underrunning.
+              • New stopPlayback() — soft stop that pauses + flushes the
+                AudioTrack and clears counters but PRESERVES the engine.
+              • beginPlayback() now also flushes the AudioTrack so
+                getPlaybackHeadPosition() restarts at 0 in sync with
+                totalFramesWritten = 0.
+
+          (B) TTSManagerModule.kt — new @ReactMethod
+              • @ReactMethod stopPlayback(promise) → calls
+                AudioPlayer.stopPlayback() and resolves the in-flight
+                pendingPromise as "Playback interrupted". Engine + AudioTrack
+                remain alive.
+              • @ReactMethod isReady(promise) → lightweight probe used by JS
+                diagnostics screen.
+              • deinitialize() unchanged (still available for full teardown).
+
+          (C) piperEngine.ts — stopSpeak() uses stopPlayback
+              • stopSpeak() now calls NativeModules.TTSManager.stopPlayback()
+                instead of tts.deinitialize(). Crucially, it does NOT clear
+                ready / initPromise. The next speakSentence() resumes
+                instantly with Piper.
+              • Legacy fallback retained for old patches without
+                stopPlayback.
+
+          (D) PlayerContext.tsx — resilient fallback
+              • piperFailCountRef (max 3 consecutive errors before flipping
+                the UI engine label to 'device'). A single transient error
+                no longer demotes the engine.
+              • On success after failures, the counter resets AND the engine
+                label is promoted back to 'piper'.
+              • play() resets the counter and re-inits Piper if ready=false.
+
+          Awaiting user rebuild + new trace (eas build --platform android).
+          Expected behavior:
+            - "speak.end" timestamps should now match approximate sentence
+              durations (e.g. 1-3s, not 1ms).
+            - Continuous reading of an arbitrary number of sentences without
+              fallback to device TTS.
+            - Pause/resume preserves the Piper engine (no re-init delay).
+
+          v4 FIXES applied:
+          (a) Added @ReactMethod overload `initializeTTS(sr, ch, modelId,
+              promise: Promise)` that runs full init on background Thread and
+              resolves the promise ONLY after init.8.DONE. JS now uses
+              `await new Promise(...)` with 10-minute safety timeout.
+          (b) REVERSED provider order: ["cpu", "xnnpack"]. CPU is the
+              reference implementation in onnxruntime, handles ALL ops, just
+              slower. Eliminates the unrecoverable xnnpack SIGSEGV.
+          (c) Adaptive numThreads: for models > 80MB (Piper "high"), capped
+              to 2 threads. Reduces peak memory pressure during model load.
+          (d) JS phase6 trace now shows phase6.native.resolve/reject AT THE
+              ACTUAL completion (not 37ms later).
+          (e) Kept legacy `initializeTTSLegacy(sr, ch, modelId)` for backward
+              compat.
+
+          Total patch v4: 701 lines, 3 files modified. Promise-based init,
+          CPU-first provider, model-size-aware threads, granular trace 89+.
           Awaiting user rebuild + new trace.
           Every single sub-step of TTS init is now logged with a unique
           [native]/[audio] tag visible in the Diagnostics panel. If the JNI
@@ -220,3 +320,14 @@ agent_communication:
       fallback, VoxSherpa "calmed" VITS defaults. Native testing requires
       EAS build + physical Android device — cannot be tested by automated
       agents. User to rebuild APK and share DIAGNOSTICA PIPER trace.
+  - agent: "main"
+    message: |
+      v5 patch applied (race condition fix). 4 files modified:
+      - patches/react-native-sherpa-onnx-offline-tts+0.2.6.patch (701→1050L)
+      - src/audio/piperEngine.ts (stopSpeak now uses native stopPlayback)
+      - src/contexts/PlayerContext.tsx (resilient fallback w/ piperFailCount)
+      USER ACTION REQUIRED: rebuild via `eas build --platform android --profile preview`
+      and verify continuous reading of >2 sentences. Check the
+      "DIAGNOSTICA PIPER" trace for [audio] completion.signal / drained
+      markers and ensure speak.end timestamps now match audio durations
+      (1-3s for typical sentences, not 1ms).
