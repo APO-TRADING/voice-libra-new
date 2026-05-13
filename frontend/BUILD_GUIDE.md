@@ -71,6 +71,26 @@ frontend/assets/piper/
 #### Hai il tuo modello custom?
 Mettilo lì, rinomina se necessario.
 
+> 💡 **Modelli "high" (>100 MB) su Android**: Sherpa-ONNX su mobile predilige modelli `low`/`medium` per via dei limiti di memoria nativa. Se hai un modello custom grande che funziona su PC ma crasha su Android, puoi **quantizzarlo a INT8** con lo script GUI incluso:
+>
+> ```bash
+> # Dal tuo PC (richiede onnx + onnxruntime):
+> pip install onnx onnxruntime
+> python scripts/quantize_to_int8.py
+> ```
+>
+> Si aprirà una GUI tkinter dove:
+> 1. Sfogli e selezioni il tuo `beppe.onnx` fp32 originale
+> 2. Scegli dove salvare (auto-suggerisce `beppe_int8.onnx`)
+> 3. Premi "Avvia quantizzazione"
+> 4. Lo script applica PTDQ sicuro per sherpa-onnx (solo MatMul, attivazioni fp32 preservate)
+> 5. Valida con `onnx.checker` + smoke test `onnxruntime`
+> 6. Ti dice se il modello è compatibile con sherpa-onnx
+>
+> Risultato: 108 MB → ~30 MB. Qualità praticamente identica. **Funziona dove il fp32 high crasha**.
+>
+> Modalità CLI alternativa: `python scripts/quantize_to_int8.py beppe.onnx [beppe_int8.onnx]`
+
 #### Non hai un modello? Scarica un Piper italiano "stock":
 
 ```bash
