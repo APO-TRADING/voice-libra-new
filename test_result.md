@@ -331,3 +331,23 @@ agent_communication:
       "DIAGNOSTICA PIPER" trace for [audio] completion.signal / drained
       markers and ensure speak.end timestamps now match audio durations
       (1-3s for typical sentences, not 1ms).
+  - agent: "main"
+    message: |
+      v6 — Library UX improvements (sorting + author + navigable folders).
+      No native code changes; pure JS/RN UI work. Files:
+      - src/storage/library.ts (added `author`, `sort_order`, `SortMode`,
+        listBooksSorted, getSortMode/setSortMode, reorderBooks, getFolder,
+        backwards-compatible normalize() for old books)
+      - src/api/client.ts (exposed the new methods)
+      - src/components/BookList.tsx (NEW reusable component: grid/list,
+        4 sort modes via chips, long-press action sheet with Edit/Delete,
+        manual reorder with ↑/↓ buttons)
+      - src/components/BookEditModal.tsx (NEW: edit title/author/cover/folder)
+      - app/(tabs)/index.tsx (uses BookList)
+      - app/folders/[id].tsx (NEW: folder detail screen, route /folders/<id>
+        or /folders/none for un-filed)
+      - app/(tabs)/folders.tsx (folder rows are now navigable; pencil/trash
+        buttons stopPropagation())
+      - app/(tabs)/upload.tsx (added AUTORE TextInput)
+      - app/_layout.tsx (registered folders/[id] route)
+      Tested via tsc --noEmit and metro bundling, no errors.

@@ -20,6 +20,7 @@ function StackInner() {
       >
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="player/[id]" options={{ title: 'Riproduci', presentation: 'card' }} />
+        <Stack.Screen name="folders/[id]" options={{ headerShown: false, presentation: 'card' }} />
       </Stack>
     </>
   );

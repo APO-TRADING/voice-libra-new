@@ -13,12 +13,14 @@ import * as FileSystem from 'expo-file-system/legacy';
 export type BookSummary = {
   id: string;
   title: string;
+  author: string | null;
   cover_url: string | null;
   folder_id: string | null;
   word_count: number;
   sentence_count: number;
   current_sentence_index: number;
   length_scale: number;
+  sort_order: number;
   created_at: string;
   updated_at: string;
 };
@@ -30,8 +32,11 @@ export type BookFull = BookSummary & {
 
 export type Folder = { id: string; name: string; created_at: string };
 
+export type SortMode = 'manual' | 'recent' | 'title' | 'author';
+
 const K_BOOKS = '@beppe.books.v1';
 const K_FOLDERS = '@beppe.folders.v1';
+const K_SORT_MODE = '@beppe.sortMode.v1';
 // Legacy key (pre-FS storage). Kept for one-shot migration on read.
 const K_BOOK_CONTENT_LEGACY = (id: string) => `@beppe.book.${id}`;
 
@@ -60,7 +65,9 @@ function nowIso(): string {
 
 async function loadBooks(): Promise<BookSummary[]> {
   const raw = await AsyncStorage.getItem(K_BOOKS);
-  return raw ? (JSON.parse(raw) as BookSummary[]) : [];
+  if (!raw) return [];
+  const parsed = JSON.parse(raw) as any[];
+  return parsed.map(normalize);
 }
 
 async function saveBooks(list: BookSummary[]): Promise<void> {
@@ -80,14 +87,39 @@ function summary(b: BookSummary): BookSummary {
   return {
     id: b.id,
     title: b.title,
+    author: b.author ?? null,
     cover_url: b.cover_url ?? null,
     folder_id: b.folder_id ?? null,
     word_count: b.word_count,
     sentence_count: b.sentence_count,
     current_sentence_index: b.current_sentence_index,
     length_scale: b.length_scale,
+    sort_order: b.sort_order ?? 0,
     created_at: b.created_at,
     updated_at: b.updated_at,
+  };
+}
+
+// Backwards-compatible normalizer: applies sensible defaults to any book
+// that was saved BEFORE the `author` / `sort_order` fields existed.
+function normalize(b: any): BookSummary {
+  return {
+    id: b.id,
+    title: b.title,
+    author: b.author ?? null,
+    cover_url: b.cover_url ?? null,
+    folder_id: b.folder_id ?? null,
+    word_count: b.word_count ?? 0,
+    sentence_count: b.sentence_count ?? 0,
+    current_sentence_index: b.current_sentence_index ?? 0,
+    length_scale: b.length_scale ?? 1.0,
+    // Old books → sort_order derived from creation time so the manual
+    // order initially matches the chronological one.
+    sort_order: typeof b.sort_order === 'number'
+      ? b.sort_order
+      : (b.created_at ? new Date(b.created_at).getTime() : 0),
+    created_at: b.created_at ?? new Date().toISOString(),
+    updated_at: b.updated_at ?? b.created_at ?? new Date().toISOString(),
   };
 }
 
@@ -148,6 +180,79 @@ export const library = {
     return filtered.sort((a, b) => (b.updated_at < a.updated_at ? -1 : 1));
   },
 
+  // Returns books sorted according to the current SortMode. `manual` uses
+  // the per-book `sort_order` field (ascending). Other modes are
+  // alphabetically computed at read time so the manual order is preserved
+  // underneath and can be restored without any data migration.
+  async listBooksSorted(opts?: { folderId?: string; mode?: SortMode }): Promise<BookSummary[]> {
+    const all = await loadBooks();
+    const filtered =
+      opts?.folderId === undefined
+        ? all
+        : all.filter((b) =>
+            opts?.folderId === 'none' ? !b.folder_id : b.folder_id === opts?.folderId,
+          );
+    const mode = opts?.mode || (await library.getSortMode());
+    const arr = [...filtered];
+    switch (mode) {
+      case 'manual':
+        arr.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+        break;
+      case 'title':
+        arr.sort((a, b) => a.title.localeCompare(b.title, 'it', { sensitivity: 'base' }));
+        break;
+      case 'author':
+        arr.sort((a, b) => {
+          const aa = (a.author || '').trim();
+          const bb = (b.author || '').trim();
+          // books without an author go to the bottom
+          if (!aa && bb) return 1;
+          if (aa && !bb) return -1;
+          const cmp = aa.localeCompare(bb, 'it', { sensitivity: 'base' });
+          if (cmp !== 0) return cmp;
+          return a.title.localeCompare(b.title, 'it', { sensitivity: 'base' });
+        });
+        break;
+      case 'recent':
+      default:
+        arr.sort((a, b) => (b.updated_at < a.updated_at ? -1 : 1));
+        break;
+    }
+    return arr;
+  },
+
+  async getSortMode(): Promise<SortMode> {
+    const raw = await AsyncStorage.getItem(K_SORT_MODE);
+    if (raw === 'manual' || raw === 'recent' || raw === 'title' || raw === 'author') return raw;
+    return 'recent';
+  },
+
+  async setSortMode(mode: SortMode): Promise<void> {
+    await AsyncStorage.setItem(K_SORT_MODE, mode);
+  },
+
+  // Re-orders books by assigning incremental sort_order values in the
+  // exact sequence given. Only the IDs present in `orderedIds` are
+  // rewritten; everything else is left in its previous position. This
+  // means re-ordering inside a folder doesn't disturb the order of books
+  // in other folders.
+  async reorderBooks(orderedIds: string[]): Promise<void> {
+    const list = await loadBooks();
+    // Find the maximum existing sort_order outside this subset so we don't
+    // collide; new values start above that floor.
+    const subset = new Set(orderedIds);
+    const outside = list.filter((b) => !subset.has(b.id));
+    const maxOutside = outside.reduce((m, b) => Math.max(m, b.sort_order ?? 0), 0);
+    // Use a 100-step gap so insertion between two books later doesn't
+    // require renumbering everything.
+    const base = Math.floor(maxOutside / 100) * 100 + 100;
+    orderedIds.forEach((id, i) => {
+      const idx = list.findIndex((b) => b.id === id);
+      if (idx >= 0) list[idx].sort_order = base + (i + 1) * 100;
+    });
+    await saveBooks(list);
+  },
+
   async getBook(id: string): Promise<BookFull> {
     const list = await loadBooks();
     const b = list.find((x) => x.id === id);
@@ -158,6 +263,7 @@ export const library = {
 
   async addBook(input: {
     title: string;
+    author?: string | null;
     cover_url?: string | null;
     folder_id?: string | null;
     content: string;
@@ -166,15 +272,23 @@ export const library = {
   }): Promise<BookSummary> {
     const list = await loadBooks();
     const now = nowIso();
+    // New books always go FIRST in the manual order (lowest sort_order).
+    const minSort = list.reduce(
+      (m, b) => Math.min(m, b.sort_order ?? Number.POSITIVE_INFINITY),
+      Number.POSITIVE_INFINITY,
+    );
+    const sortOrder = Number.isFinite(minSort) ? minSort - 100 : Date.now();
     const book: BookSummary = {
       id: uuid(),
       title: input.title,
+      author: (input.author || '').trim() || null,
       cover_url: input.cover_url ?? null,
       folder_id: input.folder_id ?? null,
       word_count: input.word_count,
       sentence_count: input.sentences.length,
       current_sentence_index: 0,
       length_scale: 1.0,
+      sort_order: sortOrder,
       created_at: now,
       updated_at: now,
     };
@@ -188,16 +302,25 @@ export const library = {
 
   async updateBook(
     id: string,
-    patch: Partial<{ title: string; cover_url: string | null; folder_id: string | null; length_scale: number }>,
+    patch: Partial<{
+      title: string;
+      author: string | null;
+      cover_url: string | null;
+      folder_id: string | null;
+      length_scale: number;
+      sort_order: number;
+    }>,
   ): Promise<BookSummary> {
     const list = await loadBooks();
     const idx = list.findIndex((b) => b.id === id);
     if (idx < 0) throw new Error('Libro non trovato');
     const b = list[idx];
     if (patch.title !== undefined) b.title = patch.title;
+    if (patch.author !== undefined) b.author = (patch.author || '').trim() || null;
     if (patch.cover_url !== undefined) b.cover_url = patch.cover_url;
     if (patch.folder_id !== undefined) b.folder_id = patch.folder_id;
     if (patch.length_scale !== undefined) b.length_scale = Math.max(0.5, Math.min(2.0, patch.length_scale));
+    if (patch.sort_order !== undefined) b.sort_order = patch.sort_order;
     b.updated_at = nowIso();
     list[idx] = b;
     await saveBooks(list);
@@ -229,6 +352,11 @@ export const library = {
   async listFolders(): Promise<Folder[]> {
     const list = await loadFolders();
     return [...list].sort((a, b) => a.name.localeCompare(b.name));
+  },
+
+  async getFolder(id: string): Promise<Folder | null> {
+    const list = await loadFolders();
+    return list.find((f) => f.id === id) || null;
   },
 
   async createFolder(name: string): Promise<Folder> {

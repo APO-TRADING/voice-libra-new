@@ -1,5 +1,5 @@
-import { useFocusEffect } from 'expo-router';
-import { Folder as FolderIcon, FolderPlus, Pencil, Trash2 } from 'lucide-react-native';
+import { router, useFocusEffect } from 'expo-router';
+import { ChevronRight, Folder as FolderIcon, FolderPlus, Pencil, Trash2 } from 'lucide-react-native';
 import { useCallback, useState } from 'react';
 import {
   Alert,
@@ -87,7 +87,12 @@ export default function FoldersScreen() {
         keyExtractor={(f) => f.id}
         contentContainerStyle={{ paddingHorizontal: 24, paddingBottom: 96, gap: 12, paddingTop: 8 }}
         ListHeaderComponent={
-          <View style={[styles.row, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+          <TouchableOpacity
+            testID="folder-unfiled"
+            onPress={() => router.push('/folders/none' as any)}
+            activeOpacity={0.85}
+            style={[styles.row, { backgroundColor: colors.surface, borderColor: colors.border }]}
+          >
             <View style={[styles.iconCircle, { backgroundColor: colors.surface2 }]}>
               <FolderIcon color={colors.textSecondary} size={20} />
             </View>
@@ -95,7 +100,8 @@ export default function FoldersScreen() {
               <Text style={[styles.rowTitle, { color: colors.textPrimary }]}>Senza cartella</Text>
               <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>{unfiled} libri</Text>
             </View>
-          </View>
+            <ChevronRight color={colors.textSecondary} size={18} />
+          </TouchableOpacity>
         }
         ListEmptyComponent={
           <View style={{ alignItems: 'center', paddingVertical: 64 }}>
@@ -105,7 +111,12 @@ export default function FoldersScreen() {
           </View>
         }
         renderItem={({ item }) => (
-          <View style={[styles.row, { backgroundColor: colors.surface, borderColor: colors.border }]} testID={`folder-row-${item.id}`}>
+          <TouchableOpacity
+            onPress={() => router.push(`/folders/${item.id}` as any)}
+            activeOpacity={0.85}
+            style={[styles.row, { backgroundColor: colors.surface, borderColor: colors.border }]}
+            testID={`folder-row-${item.id}`}
+          >
             <View style={[styles.iconCircle, { backgroundColor: colors.surface2 }]}>
               <FolderIcon color={colors.primaryActive} size={20} />
             </View>
@@ -115,19 +126,28 @@ export default function FoldersScreen() {
             </View>
             <TouchableOpacity
               testID={`folder-edit-${item.id}`}
-              onPress={() => { setEditing(item); setName(item.name); setCreating(true); }}
+              onPress={(e) => {
+                e.stopPropagation();
+                setEditing(item);
+                setName(item.name);
+                setCreating(true);
+              }}
               style={[styles.smallBtn, { borderColor: colors.border }]}
             >
               <Pencil color={colors.textSecondary} size={16} />
             </TouchableOpacity>
             <TouchableOpacity
               testID={`folder-delete-${item.id}`}
-              onPress={() => remove(item)}
+              onPress={(e) => {
+                e.stopPropagation();
+                remove(item);
+              }}
               style={[styles.smallBtn, { borderColor: colors.border }]}
             >
               <Trash2 color={colors.danger} size={16} />
             </TouchableOpacity>
-          </View>
+            <ChevronRight color={colors.textSecondary} size={18} />
+          </TouchableOpacity>
         )}
       />
 

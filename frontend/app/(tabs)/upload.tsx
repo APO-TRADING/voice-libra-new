@@ -27,6 +27,7 @@ export default function UploadScreen() {
   const insets = useSafeAreaInsets();
   const [file, setFile] = useState<PickedFile | null>(null);
   const [title, setTitle] = useState('');
+  const [author, setAuthor] = useState('');
   const [coverUrl, setCoverUrl] = useState('');
   const [folderId, setFolderId] = useState<string | undefined>();
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -86,13 +87,24 @@ export default function UploadScreen() {
     try {
       const book = await api.uploadBook(file, {
         title: title.trim() || undefined,
+        author: author.trim() || undefined,
         cover_url: coverUrl.trim() || undefined,
         folder_id: folderId,
       });
       setBusy(false);
       Alert.alert('Caricato', `"${book.title}" aggiunto alla libreria.`, [
         { text: 'Riproduci', onPress: () => router.replace(`/player/${book.id}`) },
-        { text: 'OK', style: 'cancel', onPress: () => { setFile(null); setTitle(''); setCoverUrl(''); router.replace('/'); } },
+        {
+          text: 'OK',
+          style: 'cancel',
+          onPress: () => {
+            setFile(null);
+            setTitle('');
+            setAuthor('');
+            setCoverUrl('');
+            router.replace('/');
+          },
+        },
       ]);
     } catch (e: any) {
       setBusy(false);
@@ -136,6 +148,16 @@ export default function UploadScreen() {
           value={title}
           onChangeText={setTitle}
           placeholder="Titolo del libro"
+          placeholderTextColor={colors.textSecondary}
+          style={[styles.input, { color: colors.textPrimary, borderColor: colors.border, backgroundColor: colors.surface }]}
+        />
+
+        <Text style={[styles.label, { color: colors.textSecondary }]}>AUTORE</Text>
+        <TextInput
+          testID="upload-author-input"
+          value={author}
+          onChangeText={setAuthor}
+          placeholder="Nome autore (opzionale, utile per filtrare)"
           placeholderTextColor={colors.textSecondary}
           style={[styles.input, { color: colors.textPrimary, borderColor: colors.border, backgroundColor: colors.surface }]}
         />
