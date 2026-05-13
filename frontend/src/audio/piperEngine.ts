@@ -64,6 +64,19 @@ export async function clearPiperTrace(): Promise<void> {
   try { await FileSystem.deleteAsync(TRACE_FILE, { idempotent: true }); } catch { /* ignore */ }
 }
 
+// ─── Progress listener (used by Settings/Player UI to show a modal) ─────
+export type ProgressInfo = { step: string; percent: number; detail?: string };
+type ProgressCallback = (info: ProgressInfo | null) => void;
+let progressListener: ProgressCallback | null = null;
+
+export function setPiperProgressListener(cb: ProgressCallback | null): void {
+  progressListener = cb;
+}
+
+function emitProgress(step: string, percent: number, detail?: string): void {
+  try { progressListener?.({ step, percent, detail }); } catch { /* never crash */ }
+}
+
 export function getPiperDiagnostics() {
   return { ready, lastError, lastStep, available: isPiperAvailable() };
 }
@@ -90,19 +103,136 @@ async function logSystemInfo(): Promise<void> {
 }
 
 // ─── File integrity helpers (used by initEngine + runFullDiagnostics) ────
-async function verifyOnnxMagic(modelPath: string): Promise<{ ok: boolean; hex: string; sizeBytes: number }> {
+export type OnnxHeaderInfo = {
+  ok: boolean;
+  hex: string;
+  sizeBytes: number;
+  irVersion?: number;
+  producerName?: string;
+  producerVersion?: string;
+  isQuantized: boolean;
+  quantizationHint?: string;
+};
+
+// Parse the first ~256 bytes of an ONNX file to extract metadata fields
+// (ir_version, producer_name, producer_version) using a minimal protobuf
+// decoder. This lets the diagnostics screen detect:
+//   - quantized models (producer_name contains "quantize" or similar)
+//   - unusual exporters (e.g. custom optimization scripts)
+//   - very new exports (e.g. PyTorch 2.x ops not supported by old sherpa)
+async function verifyOnnxMagic(modelPath: string): Promise<OnnxHeaderInfo> {
   try {
     const info = await FileSystem.getInfoAsync(modelPath, { size: true } as any);
-    if (!info.exists) return { ok: false, hex: '(missing)', sizeBytes: 0 };
+    if (!info.exists) {
+      return { ok: false, hex: '(missing)', sizeBytes: 0, isQuantized: false };
+    }
+    // Read enough to grab ir_version + producer_name + producer_version.
     const head = await FileSystem.readAsStringAsync(modelPath, {
-      encoding: FileSystem.EncodingType.Base64, length: 16, position: 0,
+      encoding: FileSystem.EncodingType.Base64, length: 256, position: 0,
     } as any);
-    const bytes = Array.from(Buffer.from(head, 'base64'));
-    const hex = bytes.map(b => b.toString(16).padStart(2, '0')).join(' ');
-    // ONNX is a protobuf — first byte should be 0x08 (field 1, varint = ir_version)
-    return { ok: bytes[0] === 0x08, hex, sizeBytes: (info as any).size || 0 };
+    const bytes = new Uint8Array(Buffer.from(head, 'base64'));
+    const hex = Array.from(bytes.slice(0, 16))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join(' ');
+
+    // ─── Minimal protobuf parser for ModelProto header ─────────────────
+    // Wire format: tag = (field_num << 3) | wire_type
+    //   field 1: ir_version           (varint)         tag=0x08
+    //   field 2: producer_name        (length-delim)   tag=0x12
+    //   field 3: producer_version     (length-delim)   tag=0x1a
+    //   field 4: domain               (length-delim)   tag=0x22
+    //   field 5: model_version        (varint)         tag=0x28
+    let pos = 0;
+    let irVersion: number | undefined;
+    let producerName: string | undefined;
+    let producerVersion: string | undefined;
+
+    const readVarint = (): number => {
+      let val = 0;
+      let shift = 0;
+      while (pos < bytes.length) {
+        const b = bytes[pos++];
+        val |= (b & 0x7f) << shift;
+        if ((b & 0x80) === 0) return val;
+        shift += 7;
+        if (shift >= 35) break; // sanity bound
+      }
+      return val;
+    };
+
+    const readLengthDelim = (): string => {
+      const len = readVarint();
+      if (len <= 0 || pos + len > bytes.length) return '';
+      const slice = bytes.slice(pos, pos + len);
+      pos += len;
+      // ASCII / UTF-8 to string
+      let s = '';
+      for (let i = 0; i < slice.length; i++) s += String.fromCharCode(slice[i]);
+      return s;
+    };
+
+    // Parse first ~4 fields
+    try {
+      while (pos < bytes.length && pos < 200) {
+        const tag = bytes[pos++];
+        if (tag === 0x08) {
+          irVersion = readVarint();
+        } else if (tag === 0x12) {
+          producerName = readLengthDelim();
+        } else if (tag === 0x1a) {
+          producerVersion = readLengthDelim();
+        } else if (tag === 0x22) {
+          // domain — skip
+          const len = readVarint();
+          pos += len;
+        } else if (tag === 0x28) {
+          // model_version varint
+          readVarint();
+        } else {
+          // Unknown tag — stop parsing (probably entered the graph payload)
+          break;
+        }
+      }
+    } catch {
+      /* parsing best-effort */
+    }
+
+    // Detect quantization from producer name (most reliable hint without
+    // walking the full graph).
+    const producerLower = (producerName || '').toLowerCase();
+    let isQuantized = false;
+    let quantizationHint: string | undefined;
+    if (/quant/.test(producerLower)) {
+      isQuantized = true;
+      quantizationHint = `producer "${producerName}" indica quantizzazione (INT8/INT4)`;
+    } else if (/int8|qdq|qoperator/.test(producerLower)) {
+      isQuantized = true;
+      quantizationHint = `producer "${producerName}" suggerisce quantizzazione`;
+    } else if ((info as any).size && (info as any).size < 30 * 1024 * 1024 &&
+               /pytorch/.test(producerLower)) {
+      // Standard Piper Italian "medium" is ~64MB, "low" ~28MB. Below 30MB
+      // for a PyTorch export is suspicious — flag as POSSIBLY quantized.
+      isQuantized = false;
+      quantizationHint = `dimensione ${Math.round((info as any).size / 1024 / 1024)}MB inferiore ai Piper standard — possibilmente quantizzato o low-quality`;
+    }
+
+    return {
+      ok: bytes[0] === 0x08,
+      hex,
+      sizeBytes: (info as any).size || 0,
+      irVersion,
+      producerName,
+      producerVersion,
+      isQuantized,
+      quantizationHint,
+    };
   } catch (e: any) {
-    return { ok: false, hex: `(err: ${e?.message || e})`, sizeBytes: 0 };
+    return {
+      ok: false,
+      hex: `(err: ${e?.message || e})`,
+      sizeBytes: 0,
+      isQuantized: false,
+    };
   }
 }
 
@@ -212,11 +342,13 @@ export async function initEngine(): Promise<boolean> {
   if (initPromise) return initPromise;
   initPromise = (async () => {
     await trace('==INIT.START==', `sample_rate=${PIPER_SAMPLE_RATE}`);
+    emitProgress('Avvio motore TTS...', 1);
     await logSystemInfo();
 
     if (!isPiperAvailable()) {
       lastError = 'Modulo nativo Sherpa non disponibile (anteprima Expo Go)';
       await trace('check-native', 'FAIL: TTSManager non in NativeModules');
+      emitProgress('Modulo nativo non disponibile', 0, lastError);
       return false;
     }
     const nm: any = (NativeModules as any).TTSManager;
@@ -227,35 +359,61 @@ export async function initEngine(): Promise<boolean> {
       await ensureDir(DEST_DIR);
       await trace('mkdir.ok', 'directory ensured');
 
+      emitProgress('Copia del modello vocale...', 5, '108 MB');
       await trace('==PHASE.1==', 'copy beppe.onnx');
       const modelPathU = await copyAsset(PIPER_ASSETS.model, 'beppe.onnx');
       const modelStat = await FileSystem.getInfoAsync(modelPathU, { size: true } as any);
       await trace('phase1.done', `path=${modelPathU} size=${(modelStat as any).size || 0}B`);
+      emitProgress('Modello copiato', 15);
 
       await trace('==PHASE.2==', 'copy tokens.txt');
       const tokensPathU = await copyAsset(PIPER_ASSETS.tokens, 'tokens.txt');
       const tokensStat = await FileSystem.getInfoAsync(tokensPathU, { size: true } as any);
       await trace('phase2.done', `path=${tokensPathU} size=${(tokensStat as any).size || 0}B`);
+      emitProgress('Token vocali pronti', 20);
 
+      emitProgress('Estrazione dizionari fonetici...', 25, 'può richiedere 10-30s al primo avvio');
       await trace('==PHASE.3==', 'extract espeak-ng-data (può richiedere 10-30s)');
       const dataDirPathU = await unzipEspeak(PIPER_ASSETS.espeakZip);
       const dataDirStat = await FileSystem.getInfoAsync(dataDirPathU);
       const espeakCount = await countDirEntries(dataDirPathU);
       await trace('phase3.done', `path=${dataDirPathU} isDir=${dataDirStat.isDirectory} entries=${espeakCount}`);
+      emitProgress('Dizionari fonetici pronti', 45);
 
       const modelPath = stripFilePrefix(modelPathU);
       const tokensPath = stripFilePrefix(tokensPathU);
       const dataDirPath = stripFilePrefix(dataDirPathU);
 
-      // Verify ONNX magic
-      await trace('==PHASE.4==', 'verify ONNX magic bytes');
+      emitProgress('Verifica integrità modello...', 48);
+      await trace('==PHASE.4==', 'verify ONNX magic bytes + producer name + quantization');
       const magic = await verifyOnnxMagic(modelPathU);
-      await trace('phase4.magic', `head=${magic.hex} size=${magic.sizeBytes}B validMagic=${magic.ok}`);
+      await trace('phase4.magic',
+        `head=${magic.hex} ir=${magic.irVersion ?? '?'} ` +
+        `producer="${magic.producerName ?? '?'}" version="${magic.producerVersion ?? '?'}" ` +
+        `size=${magic.sizeBytes}B validMagic=${magic.ok} quantized=${magic.isQuantized}`);
+
       if (!magic.ok) {
-        await trace('phase4.WARN', 'first byte != 0x08 (not standard protobuf — but might still be valid ONNX with custom export)');
+        await trace('phase4.WARN', 'first byte != 0x08 (not standard ONNX protobuf)');
       }
 
-      // Sanity checks
+      // ─── HARD STOP for quantized models ─────────────────────────────
+      // sherpa-onnx 1.12.26's Piper pipeline expects fp32/fp16 tensors and
+      // does NOT support INT8/INT4 quantized Piper VITS models. Attempting
+      // to load one causes a SIGSEGV inside libonnxruntime.so during model
+      // initialization, which kills the entire process (uncatchable from
+      // Java/Kotlin). To avoid this confusing crash, we detect quantization
+      // here in JS and refuse to call native init.
+      if (magic.isQuantized) {
+        const msg =
+          'Il modello beppe.onnx è QUANTIZZATO (INT8/INT4) e non è ' +
+          'supportato da sherpa-onnx per Piper TTS. Devi usare un modello ' +
+          'in formato fp32 (o fp16). Vedi Diagnostica Piper → ' +
+          'NotQuantized per i dettagli, oppure scarica un modello "stock" ' +
+          'da rhasspy/piper-voices.';
+        await trace('phase4.QUANTIZED_REJECT', magic.quantizationHint || msg);
+        throw new Error(msg);
+      }
+
       await trace('==PHASE.5==', 'final sanity checks');
       if (!modelStat.exists || !(modelStat as any).size) {
         throw new Error(`modello mancante o vuoto: ${modelPath}`);
@@ -269,7 +427,6 @@ export async function initEngine(): Promise<boolean> {
       if (espeakCount < 10) {
         throw new Error(`espeak-ng-data ha solo ${espeakCount} file (estrazione fallita?)`);
       }
-      // Check for canonical espeak files
       const espeakEntries = await FileSystem.readDirectoryAsync(dataDirPathU);
       const hasPhontab = espeakEntries.includes('phontab');
       const hasPhonindex = espeakEntries.includes('phonindex');
@@ -277,9 +434,11 @@ export async function initEngine(): Promise<boolean> {
       await trace('phase5.espeak.files',
         `phontab=${hasPhontab} phonindex=${hasPhonindex} lang=${hasLang} first10=${espeakEntries.slice(0, 10).join(',')}`);
       if (!hasPhontab || !hasPhonindex) {
-        await trace('phase5.WARN', 'missing canonical espeak files (phontab/phonindex)');
+        await trace('phase5.WARN', 'missing canonical espeak files');
       }
+      emitProgress('File verificati', 55);
 
+      emitProgress('Caricamento modello in memoria...', 60, 'modello da 108 MB, attendere 10-30s');
       await trace('==PHASE.6==', 'invoke native initializeTTS (può richiedere 10-60s per modelli grandi)');
       await trace('phase6.args',
         `sr=${PIPER_SAMPLE_RATE} ch=1 modelPath=${modelPath} tokensPath=${tokensPath} dataDirPath=${dataDirPath}`);
@@ -290,57 +449,67 @@ export async function initEngine(): Promise<boolean> {
       // The patched Kotlin initializeTTS now ACCEPTS a Promise parameter
       // and runs the heavy model load on a background thread. JS must
       // ACTUALLY await this — otherwise we race ahead and call speak()
-      // while the engine is still loading (which causes a SIGSEGV on
-      // half-initialized state with no recovery).
+      // while the engine is still loading.
+      //
+      // No JS-side timeout: as the user pointed out, the first launch may
+      // legitimately need ~30-60s on slower devices. We TRUST the native
+      // side to either succeed or reject. If native hangs, the user can
+      // close the app — the next launch will see ready=false and retry.
       await new Promise<void>((resolve, reject) => {
         const native: any = (NativeModules as any).TTSManager;
         if (!native || typeof native.initializeTTS !== 'function') {
           reject(new Error('Native TTSManager.initializeTTS missing'));
           return;
         }
-        // 10-minute safety timeout: 108MB model can take 30-60s on slow
-        // devices, but never 10 minutes. If we hit this, native is hung.
-        const timeoutMs = 10 * 60 * 1000;
-        const timer = setTimeout(() => {
-          trace('phase6.TIMEOUT', `native init didn't complete in ${timeoutMs}ms`);
-          reject(new Error(`native init timeout after ${timeoutMs}ms`));
-        }, timeoutMs);
+        // Heartbeat: every 2s while we wait, update the progress UI so
+        // the user sees we're still alive (not frozen).
+        let elapsedSec = 0;
+        const heartbeat = setInterval(() => {
+          elapsedSec += 2;
+          emitProgress(
+            'Caricamento modello in memoria...',
+            Math.min(85, 60 + Math.floor(elapsedSec / 2)),
+            `${elapsedSec}s trascorsi (atteso 10-60s)`
+          );
+        }, 2000);
 
-        // The new patch's @ReactMethod returns a Promise via the 4th arg.
-        // RN bridge will resolve when promise.resolve("OK") is called by
-        // Kotlin AT THE END of doInitializeTTS (i.e. after init.8.DONE).
         const p = native.initializeTTS(PIPER_SAMPLE_RATE, 1, JSON.stringify(cfg));
         if (p && typeof p.then === 'function') {
           p.then(
             (result: any) => {
-              clearTimeout(timer);
+              clearInterval(heartbeat);
               trace('phase6.native.resolve', `result=${result}`);
               resolve();
             },
             (err: any) => {
-              clearTimeout(timer);
+              clearInterval(heartbeat);
               trace('phase6.native.reject', `${err?.message || err}`);
               reject(err);
             }
           );
         } else {
-          // Old API fallback (no promise) — should not happen with the
-          // v4 patch. Fall back to optimistic resolution after a delay.
-          clearTimeout(timer);
-          trace('phase6.WARN', 'native did not return promise — using fallback 30s delay');
+          clearInterval(heartbeat);
+          trace('phase6.WARN', 'native did not return promise — using fallback delay');
+          // No promise from native (old patch?) — wait a reasonable time
+          // and hope for the best.
           setTimeout(() => resolve(), 30_000);
         }
       });
       await trace('phase6.done', 'native initializeTTS resolved promise (FULL init complete)');
+      emitProgress('Test rapido voce...', 90);
 
       ready = true;
       lastError = null;
       await trace('==INIT.READY==', 'TTS engine pronto');
+      emitProgress('Voce pronta!', 100);
+      // Give the UI a moment to show the "Pronta" status before clearing
+      setTimeout(() => emitProgress('', 0), 1500);
       return true;
     } catch (e: any) {
       ready = false;
       lastError = `${lastStep}: ${e?.message || String(e)}`;
       await trace('==INIT.ERROR==', `at step=${lastStep}: ${e?.message || String(e)}`);
+      emitProgress('Errore caricamento', 0, e?.message || String(e));
       return false;
     }
   })();
@@ -389,12 +558,43 @@ export async function runFullDiagnostics(): Promise<DiagnosticItem[]> {
   await push('Model', modelInfo.exists && modelSize > 1_000_000,
     `${modelPath} exists=${modelInfo.exists} size=${modelSize}B (${(modelSize / 1024 / 1024).toFixed(1)}MB)`);
 
-  // 6. ONNX magic
+  // 6. ONNX magic + producer name + quantization detector
   if (modelInfo.exists) {
     const magic = await verifyOnnxMagic(modelPath);
-    await push('OnnxMagic', magic.ok, `head=${magic.hex} (valid=${magic.ok})`);
+    await push('OnnxMagic', magic.ok,
+      `head=${magic.hex} ir=${magic.irVersion ?? '?'} valid=${magic.ok}`);
+
+    // 6b. Producer name (huge clue about compatibility)
+    const producerLabel = magic.producerName
+      ? `${magic.producerName}${magic.producerVersion ? ' ' + magic.producerVersion : ''}`
+      : '(producer non rilevato)';
+    // Standard Piper models have producer "pytorch". Anything else is unusual.
+    const isStandardPiper = !!(magic.producerName &&
+      /pytorch/i.test(magic.producerName) && !magic.isQuantized);
+    await push('ModelFormat', isStandardPiper, producerLabel);
+
+    // 6c. Quantization warning — this is the SINGLE most important check
+    // for diagnosing the SIGSEGV on this device.
+    if (magic.isQuantized) {
+      await push(
+        'NotQuantized',
+        false,
+        `⚠ MODELLO QUANTIZZATO: ${magic.quantizationHint}. ` +
+        `sherpa-onnx Piper NON supporta i modelli INT8/INT4 quantizzati: ` +
+        `richiede fp32 (o fp16). Riesporta beppe.onnx senza --quantize, ` +
+        `oppure usa un modello Piper "stock" da rhasspy/piper-voices.`
+      );
+    } else if (magic.quantizationHint) {
+      // Suspicious but not confirmed
+      await push('NotQuantized', false, `⚠ ${magic.quantizationHint}`);
+    } else {
+      await push('NotQuantized', true,
+        `formato standard, dim=${(magic.sizeBytes / 1024 / 1024).toFixed(1)}MB`);
+    }
   } else {
     await push('OnnxMagic', false, '(skipped: model not copied yet)');
+    await push('ModelFormat', false, '(skipped: model not copied yet)');
+    await push('NotQuantized', false, '(skipped: model not copied yet)');
   }
 
   // 7. Tokens file
