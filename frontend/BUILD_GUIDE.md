@@ -110,33 +110,33 @@ Se hai un modello fp32 (60-200 MB) e vuoi ridurlo a ~50% per girare meglio su mo
 # Dalla radice del repo, installa le dipendenze (una sola volta)
 pip install onnx onnxconverter-common onnxruntime
 
-# Converti il tuo .onnx IN-PLACE (sovrascrive l'originale solo dopo validazione)
+# Converti il tuo .onnx IN-PLACE — funziona con QUALSIASI nome di file
 python scripts/convert_to_fp16.py frontend/assets/piper/beppe.onnx
 ```
 
-Lo script:
-- Mantiene I/O in fp32 (compatibile sherpa-onnx)
-- Converte tutti i pesi interni a fp16 (riduzione 50%)
-- Valida con `onnx.checker` + smoke test `onnxruntime`
-- Se la validazione fallisce, l'originale resta intatto
-- Solo dopo successo sovrascrive il file (atomic replace)
+Lo script usa un approccio **auto-healing iterativo** specifico per Piper/VITS:
+
+1. **Pre-blocca** le zone Piper note per rompersi in fp16: `/dp`, `/flow`, `/enc_p`, `/enc_q`, ops `Add`/`Mul`/`Clip`/`Range`
+2. **Tenta** la conversione + smoke test in `onnxruntime` CPU
+3. Se carica → salva con atomic replace (sovrascrive l'originale)
+4. Se fallisce → parsa l'errore di `onnxruntime`, estrae il nodo problematico, aggiunge il nodo + i suoi predecessori (depth 3) alla blacklist e **ritenta**
+5. Itera fino a max 150 tentativi
+6. Se la validazione finale fallisce → l'originale resta intatto
 
 Output atteso:
+
 ```
-==> Carico modello: beppe.onnx (120.3MB)
-    producer: pytorch 2.1.0
-    pesi: 245 fp32, 0 fp16
-==> Conversione a fp16 (keep_io_types=True, op_block_list=[])
-==> Scrivo temporaneo: beppe.onnx.tmp
-    dimensione: 120.3MB → 60.2MB (-50%)
-==> Validazione struttura ONNX (onnx.checker)
-    ✓ struttura valida
-==> Smoke test con onnxruntime CPU
-    inputs:  [('input', 'tensor(int64)'), ..., ('scales', 'tensor(float)'), ...]
-    outputs: [('output', 'tensor(float)')]
-    ✓ il modello carica e ha I/O fp32 corretti
-==> Sovrascrivo beppe.onnx (atomic replace)
-✓ CONVERSIONE COMPLETATA CON SUCCESSO
+==> Caricamento modello: beppe.onnx (120.3MB)
+
+==> Avvio Deep Scan (Auto-Healing dei nodi sensibili)
+[Tentativo 1/150] Nodi protetti: 287
+[Tentativo 4/150] Nodi protetti: 295
+✅ Modello stabilizzato con successo al tentativo 4!
+==> Salvataggio in corso...
+----------------------------------------
+SUCCESSO: beppe.onnx è ora in FP16.
+Dimensione: 120.3MB -> 60.2MB (-50.0%)
+----------------------------------------
 ```
 
 #### Opzione C — Modello "stock" Italiano già pronto
