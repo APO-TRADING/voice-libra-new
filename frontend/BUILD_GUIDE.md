@@ -1,180 +1,117 @@
-# Guida passo-passo: dal modello Piper al build APK
+# 📖 Guida completa: dal clone del repo al build APK
 
-> Stato finale: APK installabile su Android con il motore Piper TTS embedded.
-> Tempo totale stimato: **40-60 minuti** (di cui ~30 min per il build remoto EAS).
+> Tempo totale stimato: **~45 minuti** (di cui ~25 min di build remoto su server EAS).
+> Tutto va eseguito **una volta sola** per i tool — i build successivi richiedono solo gli ultimi 3 comandi.
 
 ---
 
-## 0. Pre-requisiti (UNA VOLTA SOLA, sul tuo PC)
+## STEP 1 — Software da installare sul PC (UNA SOLA VOLTA)
 
-Apri un terminale (PowerShell su Windows, Terminal su macOS/Linux) e verifica:
+Apri un terminale (PowerShell su Windows, Terminal su macOS/Linux) e verifica cosa hai già:
 
 ```bash
-node --version       # serve >= 20.x       (se manca: https://nodejs.org)
-yarn --version       # serve >= 1.22       (se manca: npm install -g yarn)
-python3 --version    # serve >= 3.9        (se manca: https://python.org)
+node --version       # serve >= 20.x
+yarn --version       # serve >= 1.22
+python --version     # serve >= 3.9  (su Windows usa "python", su macOS/Linux "python3")
 git --version        # serve >= 2.30
 ```
 
-Se uno qualsiasi manca, installalo prima di proseguire.
+Per ciò che manca:
 
-Poi installa i CLI globali Expo + EAS (UNA SOLA VOLTA):
+| Tool | Dove scaricare | Comando alternativo |
+|------|----------------|---------------------|
+| **Node.js LTS** | https://nodejs.org | — |
+| **Yarn** | (dopo Node) | `npm install -g yarn` |
+| **Python 3** | https://python.org | — |
+| **Git** | https://git-scm.com | — |
+| **EAS CLI** | (dopo Node) | `npm install -g eas-cli` |
 
-```bash
-npm install -g eas-cli
-npm install -g expo-cli
-```
-
-Verifica:
+Verifica i CLI globali:
 
 ```bash
 eas --version        # serve >= 13.0.0
-expo --version       # qualsiasi versione recente va bene
+```
+
+Crea un account Expo gratuito su **https://expo.dev/signup** se non ne hai già uno.
+
+---
+
+## STEP 2 — Cloni il repository in Visual Studio Code
+
+1. Apri **Visual Studio Code**
+2. `Ctrl+Shift+P` (Win/Linux) / `Cmd+Shift+P` (macOS) → digita **"Git: Clone"** → Invio
+3. Incolla l'URL del repo: `https://github.com/<TU>/beppe-audiobooks.git` (sostituisci con il tuo)
+4. Scegli una cartella locale dove clonarlo
+5. Quando VS Code chiede "Open repository?" → **Open**
+6. Apri il terminale integrato: `Ctrl+ò` (Win/Linux) o `Ctrl+ù`
+
+In alternativa, da terminale:
+
+```bash
+cd ~/Documents          # o dove preferisci
+git clone https://github.com/<TU>/beppe-audiobooks.git
+cd beppe-audiobooks
+code .                  # apre VS Code nella cartella appena clonata
 ```
 
 ---
 
-## 1. Clonare/aggiornare il repository
+## STEP 3 — Posizioni il modello Piper
 
-Se non lo hai ancora clonato:
+Devi mettere **due file** dentro `frontend/assets/piper/`:
 
-```bash
-git clone <URL-del-tuo-repo>
-cd beppe-audiobooks
+```
+frontend/assets/piper/
+├── beppe.onnx          ← Il tuo modello VITS in formato fp32 (60-200 MB)
+└── beppe.onnx.json     ← Il config Piper standard (JSON ~3 KB)
 ```
 
-Se ce l'hai già localmente:
+> ⚠️ **Importante**: il modello deve essere in **fp32** (formato standard di Piper). La nostra app rileva automaticamente modelli incompatibili e ti avvisa nel pannello Diagnostica.
+
+#### Hai il tuo modello custom?
+Mettilo lì, rinomina se necessario.
+
+#### Non hai un modello? Scarica un Piper italiano "stock":
 
 ```bash
-cd beppe-audiobooks
-git pull origin main      # o il branch su cui stai lavorando
-```
+cd frontend/assets/piper
 
-> ⚠️ **IMPORTANTE**: assicurati che la patch dettagliata `frontend/patches/react-native-sherpa-onnx-offline-tts+0.2.6.patch` sia presente (deve avere **640 righe** circa, con `1.12.26` e `xnnpack`).
+# Voce femminile (paola, ~64 MB)
+curl -L -o beppe.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/paola/medium/it_IT-paola-medium.onnx
+curl -L -o beppe.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/paola/medium/it_IT-paola-medium.onnx.json
+
+# Oppure voce maschile (riccardo, ~28 MB)
+# curl -L -o beppe.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/riccardo/x_low/it_IT-riccardo-x_low.onnx
+# curl -L -o beppe.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/riccardo/x_low/it_IT-riccardo-x_low.onnx.json
+
+cd ../../..
+```
 
 Verifica:
 
 ```bash
-wc -l frontend/patches/react-native-sherpa-onnx-offline-tts+0.2.6.patch
-grep "1.12.26\|xnnpack\|noiseScale = 0.35" frontend/patches/react-native-sherpa-onnx-offline-tts+0.2.6.patch
+ls -lh frontend/assets/piper/
+# Devono comparire:
+# beppe.onnx          (60-200 MB se fp32)
+# beppe.onnx.json     (~3 KB)
+# espeak-ng-data.bin  (~9 MB, già presente nel repo)
 ```
-
-Devi vedere `640 patches/...` e tre righe (versione, xnnpack, noiseScale).
 
 ---
 
-## 2. Mettere il modello Piper nel posto giusto
+## STEP 4 — Inietta i metadata Sherpa-ONNX nel modello
 
-Copia questi DUE file nella cartella `frontend/assets/piper/`:
-
-```
-frontend/assets/piper/
-├── beppe.onnx          ← Modello VITS in formato FP32 (NON fp16, NON quantizzato!)
-└── beppe.onnx.json     ← Il config Piper standard (JSON piccolo, ~3KB)
-```
-
-### ⚠️ CRITICO — Formato del modello
-
-Sherpa-ONNX 1.12.26 (la libreria che usa la nostra app per Piper) supporta:
-- ✅ **fp32** (float32 piena precisione) — formato standard di Piper
-- ✅ **fp16** (float16) — **MA SOLO se convertito correttamente** (vedi sotto)
-- ❌ **INT8/INT4 quantizzato** → errore `QuantizeLinear`/`tensor(int8)`
-- ❌ **fp16 con I/O fp16** → errore `tensor(float16) does not match tensor(float)`
-- ❌ **fp16 con conversione parziale** → stesso errore
-
-#### Come riconoscere un modello incompatibile
-
-| Dimensione | Producer name | I/O tensor types | Esito |
-|------------|--------------|------------------|-------|
-| 60-200 MB | `pytorch` | float32 | ✅ fp32 puro, OK |
-| 30-100 MB | `pytorch` (con script di conversione corretto) | float32 | ✅ fp16 corretto, OK |
-| 30-100 MB | `pytorch` `--half` | float16 | ❌ I/O fp16, sherpa rifiuta |
-| < 30 MB | `onnx.quantize` o simili | int8 | ❌ Quantizzato |
-
-#### Opzione A — Riesporta in fp32 puro
-
-Se hai il `.ckpt` del training:
+Lo script Python aggiunge i metadata richiesti da sherpa-onnx **dentro** `beppe.onnx`, e genera automaticamente `tokens.txt` + `piper-config.json`:
 
 ```bash
-python -m piper_train.export_onnx \
-    --checkpoint <checkpoint.ckpt> \
-    --output beppe.onnx
-    # NON usare --half / --fp16 / --quantize
-```
-
-#### Opzione B — Converti il tuo .onnx fp32 in fp16 corretto (CONSIGLIATO)
-
-Se hai un modello fp32 (60-200 MB) e vuoi ridurlo a ~50% per girare meglio su mobile:
-
-```bash
-# Dalla radice del repo, installa le dipendenze (una sola volta)
-pip install onnx onnxconverter-common onnxruntime
-
-# Converti il tuo .onnx IN-PLACE — funziona con QUALSIASI nome di file
-python scripts/convert_to_fp16.py frontend/assets/piper/beppe.onnx
-```
-
-Lo script usa un approccio **auto-healing iterativo** specifico per Piper/VITS:
-
-1. **Pre-blocca** le zone Piper note per rompersi in fp16: `/dp`, `/flow`, `/enc_p`, `/enc_q`, ops `Add`/`Mul`/`Clip`/`Range`
-2. **Tenta** la conversione + smoke test in `onnxruntime` CPU
-3. Se carica → salva con atomic replace (sovrascrive l'originale)
-4. Se fallisce → parsa l'errore di `onnxruntime`, estrae il nodo problematico, aggiunge il nodo + i suoi predecessori (depth 3) alla blacklist e **ritenta**
-5. Itera fino a max 150 tentativi
-6. Se la validazione finale fallisce → l'originale resta intatto
-
-Output atteso:
-
-```
-==> Caricamento modello: beppe.onnx (120.3MB)
-
-==> Avvio Deep Scan (Auto-Healing dei nodi sensibili)
-[Tentativo 1/150] Nodi protetti: 287
-[Tentativo 4/150] Nodi protetti: 295
-✅ Modello stabilizzato con successo al tentativo 4!
-==> Salvataggio in corso...
-----------------------------------------
-SUCCESSO: beppe.onnx è ora in FP16.
-Dimensione: 120.3MB -> 60.2MB (-50.0%)
-----------------------------------------
-```
-
-#### Opzione C — Modello "stock" Italiano già pronto
-
-Se non hai modelli custom, scarica un Piper italiano fp32 dalla repo ufficiale:
-
-```bash
-cd frontend/assets/piper
-# Paola medium (~64MB fp32, donna)
-curl -L -o beppe.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/paola/medium/it_IT-paola-medium.onnx
-curl -L -o beppe.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/paola/medium/it_IT-paola-medium.onnx.json
-
-# Opzionale: convertilo a fp16 per dimezzarne la dimensione (~32MB)
-cd ../../..
-python scripts/convert_to_fp16.py frontend/assets/piper/beppe.onnx
-```
-
-> 💡 La nostra app **rileva automaticamente** modelli incompatibili nel pannello DIAGNOSTICA PIPER. Se vedi l'avviso arancione "Modello in FP16 incompatibile" o "Modello QUANTIZZATO incompatibile", segui i suggerimenti mostrati.
-
----
-
-## 3. Preparare il modello (iniezione metadata sherpa-onnx)
-
-Lo script Python:
-
-1. Inietta i metadata richiesti da sherpa-onnx **dentro** `beppe.onnx` (in-place)
-2. Genera `tokens.txt` dal `phoneme_id_map` del `.json`
-3. Genera `piper-config.json` (sample rate, language, voice) che l'app legge a runtime
-
-```bash
-# Dalla RADICE del repo (NON dentro frontend/)
+# DALLA RADICE del repo (NON dentro frontend/)
 pip install onnx==1.17.0
 python scripts/prepare_piper_model.py
 ```
 
 Output atteso:
 
-```text
+```
 -> Leggo config da beppe.onnx.json
 -> Genero tokens.txt
    130 token scritti
@@ -186,37 +123,35 @@ Output atteso:
      has_espeak = 1
      n_speakers = 1
      sample_rate = 22050
--> Scritto piper-config.json: {'sample_rate': 22050, 'language': 'Italian', 'voice': 'it', 'n_speakers': 1}
-
-✓ Fatto! Adesso puoi buildare l'APK:
-    cd frontend && npx expo prebuild --clean && eas build ...
+-> Scritto piper-config.json
+✓ Fatto!
 ```
 
-Verifica i 4 file generati:
+Verifica i 4 file che ora devono esserci in `frontend/assets/piper/`:
 
 ```bash
 ls -lh frontend/assets/piper/
-# beppe.onnx           (con metadata aggiunti)
-# beppe.onnx.json      (puoi cancellarlo se vuoi, non serve più all'app)
-# espeak-ng-data.bin   (già presente nel repo, ~9MB)
-# piper-config.json    (auto-generato, piccolo)
-# tokens.txt           (auto-generato, ~800 byte)
+# beppe.onnx            (con metadata sherpa iniettati)
+# beppe.onnx.json       (puoi anche cancellarlo ora, l'app non lo usa)
+# espeak-ng-data.bin
+# piper-config.json     (auto-generato)
+# tokens.txt            (auto-generato)
 ```
 
-> ⚠️ Se cambi `beppe.onnx` (per esempio scarichi una versione nuova del modello), DEVI rilanciare lo script Python prima di buildare di nuovo.
+> 💡 Lo script va rilanciato **solo** se cambi `beppe.onnx`. Altrimenti puoi saltare questo step nei build successivi.
 
 ---
 
-## 4. Installare le dipendenze JS + applicare la patch nativa
+## STEP 5 — Installa le dipendenze JavaScript
 
 ```bash
 cd frontend
 yarn install
 ```
 
-Output atteso (le ultime righe):
+Output critico nelle ultime righe:
 
-```text
+```
 $ patch-package
 patch-package 8.0.1
 Applying patches...
@@ -224,77 +159,56 @@ react-native-sherpa-onnx-offline-tts@0.2.6 ✔
 Done in XX.XXs.
 ```
 
-> 🔥 **CRITICO**: la riga `react-native-sherpa-onnx-offline-tts@0.2.6 ✔` conferma che la patch v3 (640 righe, JitPack 1.12.26, xnnpack→cpu, log granulari) è stata applicata. Se vedi `✗` o errori, FERMATI e mandami il log.
+🔥 **CRITICO**: la riga `react-native-sherpa-onnx-offline-tts@0.2.6 ✔` conferma che la patch nativa (JitPack 1.12.26, Promise async, cpu→xnnpack fallback, log granulari) è stata applicata correttamente. Se vedi `✗` o errori, FERMATI e mandami il log.
 
-Verifica manuale:
+Verifica manuale che la patch sia attiva:
 
 ```bash
 grep "sherpa-onnx:1.12.26" node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
-grep -c "AudioPlayerTrace" node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt
+grep -c "doInitializeTTS\|promise: Promise" node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
 ```
 
-Devi vedere la riga `implementation 'com.github.k2-fsa:sherpa-onnx:1.12.26'` e un numero ≥ 25.
+Devi vedere `implementation 'com.github.k2-fsa:sherpa-onnx:1.12.26'` e un numero ≥ 6.
 
 ---
 
-## 5. Autenticarsi su EAS (UNA VOLTA SOLA)
+## STEP 6 — Autenticazione EAS (UNA SOLA VOLTA)
 
 ```bash
-eas login
+eas login                # inserisci email + password Expo
+eas whoami               # verifica
 ```
 
-Inserisci email e password Expo. Se non hai un account: vai su https://expo.dev/signup, crealo (gratis), poi torna a `eas login`.
-
-Verifica:
+Se è la **prima build** di questo progetto, configura il progetto sui server EAS:
 
 ```bash
-eas whoami
-# Deve stampare il tuo username Expo
+eas init                 # genera il projectId in app.json
 ```
 
-Se è la PRIMA volta che fai un build per questo progetto, configura EAS:
-
-```bash
-eas init
-```
-
-> Questo crea il `projectId` e lo aggiunge a `app.json`. Se vedi errori del tipo "Project already configured", va bene: skip.
+Se vedi "Project already configured" → ok, salta.
 
 ---
 
-## 6. Pre-build nativo
-
-Questo step genera la cartella `android/` con tutto il codice Kotlin (patch inclusa) prima del compile remoto:
+## STEP 7 — Pre-build nativo Android
 
 ```bash
 # Sempre dentro frontend/
 npx expo prebuild --clean --platform android
 ```
 
-Output atteso (estratto):
+⏱️ ~1-2 minuti. Output finale:
 
-```text
+```
 ✔ Cleaned native folder
 ✔ Created native directory
-✔ Installed CocoaPods (skip su Windows)
 ✔ Finished prebuild
 ```
 
-Tempo: ~1-2 minuti.
-
-> ⚠️ Il flag `--clean` elimina la cartella `android/` esistente e la ricrea da zero. Necessario quando hai cambiato `app.json`, `plugins`, o il modulo nativo patchato.
-
-Verifica veloce che la patch sia nei file generati:
-
-```bash
-grep "sherpa-onnx:1.12.26" node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
-```
-
-Se OK procedi.
+> 💡 Il flag `--clean` elimina e ricrea da zero la cartella `android/`. Sempre necessario dopo modifiche a `app.json`, plugins o moduli nativi patchati.
 
 ---
 
-## 7. Lanciare il build remoto EAS
+## STEP 8 — 🚀 Build remoto EAS
 
 ```bash
 # Sempre dentro frontend/
@@ -303,136 +217,119 @@ eas build --platform android --profile preview --clear-cache
 
 Cosa succede:
 
-1. EAS impacchetta il sorgente (`.tar.gz`) e lo carica sui suoi server
-2. Compila il modulo Sherpa-ONNX AAR via JitPack (la PRIMA volta richiede ~5 min extra)
+1. EAS comprime e carica il sorgente sui suoi server
+2. La prima volta scarica e compila `sherpa-onnx:1.12.26` via JitPack (~5 min extra)
 3. Compila l'APK Android (gradle, ~10-20 min)
-4. Ti dà un link per scaricare l'APK
+4. Ti restituisce un link per scaricare l'APK
 
 Output atteso:
 
-```text
-✔ Linked to project @youruser/beppe-audiobooks
-✔ Using remote credentials (Expo server)
+```
 ✔ Compressing project files and uploading to EAS Build...
 ✔ Build queued
-👉 https://expo.dev/accounts/youruser/projects/beppe-audiobooks/builds/<UUID>
+👉 https://expo.dev/accounts/<TU>/projects/beppe-audiobooks/builds/<UUID>
 ```
 
-Apri il link nel browser per vedere il log live.
+Apri il link nel browser per vedere il log live. Puoi chiudere il terminale: il build continua sui server EAS e ti arriva una notifica email a completamento.
 
-Tempo totale: **25-40 minuti** (più tempo la prima volta perché JitPack deve buildare l'AAR `1.12.26`).
-
-> 💡 Se vuoi continuare a usare il PC mentre builda, puoi chiudere il terminale: il build continua sui server EAS.
+⏱️ **25-40 minuti totali**.
 
 ---
 
-## 8. Scaricare e installare l'APK
+## STEP 9 — Installa l'APK sul telefono
 
-Quando il build finisce, EAS ti manda una notifica (email + browser) con un pulsante **"Install"**.
+Quando il build finisce ricevi un'email Expo con un pulsante **"Install"**.
 
-**Opzione A (più semplice)**: Apri il link sul tuo Android, tocca "Install", abilita "Install from unknown sources" se richiesto.
+**Da telefono Android** (più rapido):
+1. Apri il link dell'email
+2. Tocca "Install"
+3. Se richiesto, abilita "Origini sconosciute" / "Installa da fonti esterne"
 
-**Opzione B (da PC)**: scarica `.apk`, trasferisci sul telefono (USB / Drive / WhatsApp Web), apri il file dal File Manager.
+**Da PC**:
+1. Scarica il file `.apk` dalla pagina EAS
+2. Trasferiscilo sul telefono (USB / Drive / WhatsApp / Telegram)
+3. Aprilo dal File Manager Android → Installa
 
-> ⚠️ Se hai già installata una versione precedente di Beppe Audiobooks, **disinstallala prima** (altrimenti potresti avere conflitti di firma).
+> ⚠️ Se avevi una versione precedente di "Beppe Audiobooks" installata, **disinstallala prima** per evitare conflitti di firma.
 
 ---
 
-## 9. Primo avvio e diagnostica (NON premere subito "Test voce"!)
+## STEP 10 — Primo avvio e test
 
 1. Apri **Beppe Audiobooks** sul telefono
-2. Vai su tab **Impostazioni**
+2. Vai sulla tab **Impostazioni**
 3. Scorri fino a **DIAGNOSTICA PIPER**
-4. **PRIMA cosa: tocca "Verifica"** (pulsante con icona ▶ vicino a "Verifica integrità file")
-
-Vedrai 10 indicatori colorati:
-
-| Indicatore | Cosa controlla | Verde ✓ = OK |
-|------------|----------------|----------------|
-| Platform | iOS/Android | sempre |
-| Device | brand, model, RAM | sempre |
-| NativeModule | TTSManager Kotlin disponibile | dopo build OK |
-| DestDir | `documents/piper/` esiste | dopo primo Test |
-| Model | `beppe.onnx` copiato (> 1MB) | dopo primo Test |
-| OnnxMagic | primo byte protobuf valido | dopo primo Test |
-| Tokens | `tokens.txt` non vuoto | dopo primo Test |
-| EspeakDir | `espeak-ng-data/` esiste | dopo primo Test |
-| EspeakFiles | ≥ 10 file + phontab + phonindex | dopo primo Test |
-| TraceFile | trace log writable | sempre |
-
-> 💡 Al **primissimo** avvio molti saranno ❌ perché i file vengono copiati on-demand al primo Play. È **normale**.
-
-5. **Solo dopo aver verificato il check `NativeModule = ✓`**, tocca **"Test voce"**.
+4. **Tocca "Verifica"** (icona ▶ accanto a "Verifica integrità file")
+   - Vedrai 11 indicatori colorati ✓/✗
+   - Al primissimo avvio alcuni saranno ✗ perché i file non sono ancora stati copiati → **normale**
+5. Tocca **"Test voce"**
    - Vedrai un alert "Inizializzazione Piper, attendi 10-30 sec..."
-   - Aspetta. La prima init scompatta `espeak-ng-data.zip` (3000+ file)
-   - Se tutto va bene → senti "Ciao" → "Test OK"
+   - La prima inizializzazione:
+     - Copia `beppe.onnx` dagli asset al filesystem (~80 ms)
+     - Estrae `espeak-ng-data.zip` (~13 sec, 355 file)
+     - Carica il modello in memoria nativa (~10-30 sec)
+6. Se senti **"Ciao"** → 🎉 **funziona!**
 
-6. **Se invece l'app crasha** → riaprila → Impostazioni → **"Aggiorna"** → **"Copia"** → incollami il log
+### Se qualcosa non va
 
----
+Apri **Impostazioni → DIAGNOSTICA PIPER**:
 
-## 10. Cosa fare se qualcosa non funziona
-
-### Caso A: errore durante `prepare_piper_model.py`
-- Verifica che `beppe.onnx` E `beppe.onnx.json` siano dentro `frontend/assets/piper/`
-- Reinstalla onnx: `pip install --upgrade onnx==1.17.0`
-
-### Caso B: `yarn install` non applica la patch
-```bash
-cd frontend
-rm -rf node_modules
-yarn install
-```
-Se vedi ancora errori, lancia manualmente:
-```bash
-npx patch-package react-native-sherpa-onnx-offline-tts
-```
-
-### Caso C: `eas build` fallisce su JitPack
-JitPack a volte impiega del tempo a buildare la prima volta. Rilancia:
-```bash
-eas build --platform android --profile preview --clear-cache
-```
-
-### Caso D: l'APK installa ma crasha subito
-- Apri Impostazioni → DIAGNOSTICA PIPER → "Aggiorna" → "Copia"
-- Mandami **tutto** il trace (sono ~89 step granulari, vedremo esattamente dove muore)
+- Se vedi una **card arancione** con un titolo tipo "Modello in FP16 incompatibile" o "Modello QUANTIZZATO incompatibile" → l'app ha rilevato un problema nel modello, segui il suggerimento (di solito serve un modello fp32 standard).
+- Altrimenti tocca **"Aggiorna"** → **"Copia"** → incollami il trace nella chat e analizziamo insieme.
 
 ---
 
-## Riepilogo TL;DR (per quando avrai memorizzato il flusso)
+## 🆘 Troubleshooting rapido
+
+| Problema | Soluzione |
+|----------|-----------|
+| `prepare_piper_model.py` errore "module onnx not found" | `pip install onnx==1.17.0` |
+| `yarn install` non applica patch | `rm -rf node_modules && yarn install` |
+| `eas login` chiede 2FA | Usa la password app generata da expo.dev/settings/security |
+| EAS build fallisce su JitPack | Rilancia: stesso comando `eas build ...` |
+| APK installa ma crasha al primo Play | Manda il trace dalla DIAGNOSTICA PIPER |
+| Voce non si sente / modello rifiutato | Vedi la card "ModelFormat" nella DIAGNOSTICA |
+
+---
+
+## ⚡ TL;DR — Comandi per i build successivi (dopo il primo setup)
+
+Una volta che hai il setup iniziale fatto, i build successivi richiedono solo:
 
 ```bash
-# Dalla radice del repo:
-python scripts/prepare_piper_model.py        # se hai cambiato beppe.onnx
+# Dalla radice del repo, SOLO se cambi beppe.onnx:
+python scripts/prepare_piper_model.py
 
 # Dentro frontend/:
 cd frontend
-yarn install                                  # applica patch v3
+yarn install                                  # se hai pull-ato modifiche dal repo
 npx expo prebuild --clean --platform android
 eas build --platform android --profile preview --clear-cache
 ```
 
-**Tempi**: 1min + 1min + 2min + 25min remoto = **~30 minuti totali**.
+**Tempo totale build successivo**: ~30 minuti (quasi tutto remoto).
 
 ---
 
-## Comandi diagnostici utili
+## 🔍 Comandi di verifica pre-build (utili in caso di problemi)
 
 ```bash
-# Quale versione AAR userà il build?
-grep "sherpa-onnx:" frontend/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
+# Dentro frontend/
 
-# Quanti trace native sono attivi?
-grep -c "nativeTrace\|AudioPlayerTrace.log" frontend/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/*.kt
+# 1) Quale versione AAR userà il build?
+grep "sherpa-onnx:" node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
 
-# La patch è applicata?
-grep "ACCEPTED\|REJECTED\|xnnpack" frontend/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt | head -3
+# 2) La patch nativa è applicata? (deve uscire un numero >= 6)
+grep -c "doInitializeTTS\|promise: Promise" \
+  node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
 
-# Lista i tuoi build EAS
+# 3) Provider order corretto? (deve uscire cpu prima di xnnpack)
+grep "arrayOf(\"cpu\"" node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
+
+# 4) Lista i tuoi build EAS recenti
 eas build:list --platform android --limit 5
 ```
 
 ---
 
-_Documento generato per il workflow di build di Beppe Audiobooks v1.0._
+_Guida per il workflow di build di Beppe Audiobooks._
