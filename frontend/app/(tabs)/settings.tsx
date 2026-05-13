@@ -1,10 +1,11 @@
 import Slider from '@react-native-community/slider';
-import { AlertCircle, Check, Copy, Cpu, Mic, Moon, Play, RefreshCw, Sun, X } from 'lucide-react-native';
+import { AlertCircle, AlertTriangle, Check, Copy, Cpu, Mic, Moon, Play, RefreshCw, Sun, X } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
 import { Alert, Clipboard, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   clearPiperTrace,
+  decodePiperError,
   DiagnosticItem,
   initEngine,
   isPiperReady,
@@ -150,6 +151,49 @@ export default function SettingsScreen() {
           </View>
         </View>
       </View>
+
+      {/* ── Friendly decoded error card ─────────────────────────────── */}
+      {piperError && (() => {
+        const decoded = decodePiperError(piperError);
+        if (!decoded) return null;
+        return (
+          <View
+            style={[
+              styles.card,
+              {
+                backgroundColor: colors.surface,
+                borderColor: '#f59e0b',
+                borderWidth: 1.5,
+                marginTop: 8,
+              },
+            ]}
+          >
+            <View style={{ padding: 14, flexDirection: 'row', gap: 12 }}>
+              <View style={{ marginTop: 2 }}>
+                <AlertTriangle color="#f59e0b" size={22} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: '#f59e0b', fontSize: 14, fontWeight: '700', marginBottom: 6 }}>
+                  {decoded.title}
+                </Text>
+                <Text style={{ color: colors.textPrimary, fontSize: 12.5, lineHeight: 18, marginBottom: 8 }}>
+                  {decoded.detail}
+                </Text>
+                <Text style={{ color: colors.textSecondary, fontSize: 11.5, fontStyle: 'italic', lineHeight: 16 }}>
+                  💡 {decoded.suggestion}
+                </Text>
+                <View style={{ marginTop: 8, flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                  <View style={{ backgroundColor: colors.surface2, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 }}>
+                    <Text style={{ color: colors.textSecondary, fontSize: 10, fontFamily: 'monospace' }}>
+                      categoria: {decoded.category}
+                    </Text>
+                  </View>
+                </View>
+              </View>
+            </View>
+          </View>
+        );
+      })()}
 
       <Text style={[styles.section, { color: colors.textSecondary }]}>DIAGNOSTICA PIPER</Text>
       <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>

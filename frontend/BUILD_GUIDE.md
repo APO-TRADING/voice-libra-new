@@ -69,20 +69,58 @@ Copia questi DUE file nella cartella `frontend/assets/piper/`:
 
 ```
 frontend/assets/piper/
-├── beppe.onnx          ← Il tuo modello Piper VITS (~20MB)
+├── beppe.onnx          ← Modello VITS in formato FP32 (NON fp16, NON quantizzato!)
 └── beppe.onnx.json     ← Il config Piper standard (JSON piccolo, ~3KB)
 ```
 
-> 💡 `beppe.onnx.json` è il file di configurazione che esce insieme al `.onnx` quando esporti un modello Piper. Contiene `audio.sample_rate`, `phoneme_id_map`, `language`, `espeak.voice`, ecc.
->
-> Se hai SOLO `beppe.onnx` senza il `.json`, il modello NON funzionerà — il `.json` è obbligatorio per generare `tokens.txt` e iniettare i metadata corretti.
+### ⚠️ CRITICO — Solo modelli FP32 (full precision)
+
+Sherpa-ONNX 1.12.26 (la libreria che usa la nostra app per Piper) supporta **SOLO** modelli in formato:
+- ✅ **fp32** (float32 piena precisione) — formato standard di Piper
+- ❌ **fp16** (float16 half-precision) → errore `tensor(float16) does not match tensor(float)`
+- ❌ **INT8/INT4 quantizzato** → errore `QuantizeLinear`/`tensor(int8)`
+- ❌ Modelli con conversione fp16 parziale → stesso errore di fp16
+
+#### Come riconoscere un modello incompatibile
+
+| Dimensione | Producer name | Esito |
+|------------|--------------|-------|
+| 60-200 MB | `pytorch` | ✅ Probabilmente fp32, OK |
+| 30-100 MB | `pytorch` con `--half` | ❌ Fp16, NON funzionerà |
+| < 30 MB | `onnx.quantize` o simili | ❌ Quantizzato, NON funzionerà |
+
+#### Se il tuo modello è incompatibile
+
+**Opzione A — Riesporta da Piper training**:
+```bash
+# NEL pipeline Piper, esporta SENZA conversioni fp16/int8
+python -m piper_train.export_onnx \
+    --checkpoint <checkpoint.ckpt> \
+    --output beppe.onnx
+    # NON aggiungere --half / --fp16 / --quantize
+```
+
+**Opzione B — Usa un modello "stock" già testato**:
+```bash
+cd frontend/assets/piper
+
+# Paola medium (~64MB fp32, garantito funzionante)
+curl -L -o beppe.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/paola/medium/it_IT-paola-medium.onnx
+curl -L -o beppe.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/paola/medium/it_IT-paola-medium.onnx.json
+
+# Riccardo x_low (~28MB fp32, voce maschile più piccola)
+# curl -L -o beppe.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/riccardo/x_low/it_IT-riccardo-x_low.onnx
+# curl -L -o beppe.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/riccardo/x_low/it_IT-riccardo-x_low.onnx.json
+```
 
 Verifica:
 
 ```bash
-ls -lh frontend/assets/piper/beppe.onnx          # ~20MB
+ls -lh frontend/assets/piper/beppe.onnx          # FP32: 60-200MB
 ls -lh frontend/assets/piper/beppe.onnx.json     # ~2-5KB
 ```
+
+> 💡 La nostra app **rileva automaticamente** modelli incompatibili nel pannello DIAGNOSTICA PIPER (icona ⚠ "MODELLO QUANTIZZATO" o "Modello in FP16 incompatibile"). Se vedi questo avviso, NON tentare il Test voce — sostituisci il modello prima.
 
 ---
 

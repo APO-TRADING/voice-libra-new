@@ -81,6 +81,121 @@ export function getPiperDiagnostics() {
   return { ready, lastError, lastStep, available: isPiperAvailable() };
 }
 
+// ─── Friendly error decoder ──────────────────────────────────────────────
+// Translates raw sherpa-onnx Kotlin exceptions into actionable Italian text
+// so the user can immediately see *why* their model failed and *what* to do.
+// Used by Settings UI to show a user-friendly status card.
+export type DecodedError = {
+  title: string;       // short Italian title shown in the engine card
+  detail: string;      // 1-3 line technical detail
+  suggestion: string;  // what the user should do next
+  category:
+    | 'fp16_mismatch'
+    | 'quantized'
+    | 'missing_op'
+    | 'opset_too_new'
+    | 'file_corrupt'
+    | 'out_of_memory'
+    | 'native_missing'
+    | 'unknown';
+};
+
+export function decodePiperError(raw: string | null | undefined): DecodedError | null {
+  if (!raw) return null;
+  const msg = String(raw);
+
+  // 1) fp16/float16 type mismatch — model converted to fp16 inconsistently
+  if (/tensor\(float16\).*does not match.*tensor\(float\)/i.test(msg) ||
+      /Type \(tensor\(float16\)\)/i.test(msg)) {
+    return {
+      title: 'Modello in FP16 incompatibile',
+      detail:
+        'Il modello contiene tensori float16 in conflitto con tensori float32 ' +
+        'nello stesso grafo. Sherpa-ONNX Piper richiede fp32 puro.',
+      suggestion:
+        'Riesporta beppe.onnx in fp32 (senza conversione fp16), oppure usa un ' +
+        'modello Piper "stock" da huggingface.co/rhasspy/piper-voices/tree/main/it',
+      category: 'fp16_mismatch',
+    };
+  }
+
+  // 2) Quantization mismatch (INT8/INT4 ops not supported)
+  if (/QuantizeLinear|DequantizeLinear|QLinearMatMul|QLinearConv|tensor\(int8\)/i.test(msg) ||
+      /quantize/i.test(msg)) {
+    return {
+      title: 'Modello QUANTIZZATO incompatibile',
+      detail:
+        'Il modello è quantizzato INT8/INT4. Sherpa-ONNX Piper non supporta ' +
+        'modelli quantizzati per VITS.',
+      suggestion:
+        'Riesporta beppe.onnx senza quantizzazione (formato fp32), o usa un ' +
+        'modello Piper "stock" da rhasspy/piper-voices.',
+      category: 'quantized',
+    };
+  }
+
+  // 3) Unsupported op (model uses ONNX op not implemented in this onnxruntime build)
+  if (/No opset import for domain|Could not find an implementation|not implemented for/i.test(msg)) {
+    return {
+      title: 'Operazione ONNX non supportata',
+      detail:
+        'Il modello usa un\'operazione ONNX non implementata in sherpa-onnx 1.12.26.',
+      suggestion:
+        'Riesporta il modello con --opset_version 14 (più conservativo) o usa ' +
+        'un modello Piper "stock".',
+      category: 'missing_op',
+    };
+  }
+
+  // 4) Opset too new
+  if (/opset.*too new|unsupported opset/i.test(msg)) {
+    return {
+      title: 'Versione ONNX troppo recente',
+      detail: 'Il modello usa un opset_version superiore a quello supportato.',
+      suggestion: 'Riesporta con --opset_version 14 oppure 15.',
+      category: 'opset_too_new',
+    };
+  }
+
+  // 5) Corrupted file / not a valid ONNX
+  if (/Protobuf parsing failed|invalid model|corrupted|truncated/i.test(msg)) {
+    return {
+      title: 'File del modello corrotto',
+      detail: 'Il file beppe.onnx non è un ONNX valido (parsing protobuf fallito).',
+      suggestion: 'Ricopia il modello in frontend/assets/piper/ e ricostruisci.',
+      category: 'file_corrupt',
+    };
+  }
+
+  // 6) Out of memory
+  if (/out of memory|OOM|allocation failed/i.test(msg)) {
+    return {
+      title: 'Memoria insufficiente',
+      detail: 'Il dispositivo non ha abbastanza RAM libera per caricare il modello.',
+      suggestion: 'Chiudi altre app, oppure usa un modello Piper più piccolo (low/medium).',
+      category: 'out_of_memory',
+    };
+  }
+
+  // 7) Native module not available (Expo Go preview)
+  if (/native.*not available|TTSManager.*missing|Modulo nativo/i.test(msg)) {
+    return {
+      title: 'Modulo nativo mancante',
+      detail: 'Stai usando Expo Go o una build di preview senza il modulo Sherpa-ONNX.',
+      suggestion: 'Crea un build EAS: eas build --platform android --profile preview',
+      category: 'native_missing',
+    };
+  }
+
+  // Unknown error
+  return {
+    title: 'Errore TTS sconosciuto',
+    detail: msg.length > 200 ? msg.slice(0, 200) + '…' : msg,
+    suggestion: 'Apri DIAGNOSTICA PIPER e copia il trace per analisi.',
+    category: 'unknown',
+  };
+}
+
 // ─── System info dump for diagnostics ────────────────────────────────────
 async function logSystemInfo(): Promise<void> {
   try {
