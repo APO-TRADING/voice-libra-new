@@ -73,54 +73,88 @@ frontend/assets/piper/
 └── beppe.onnx.json     ← Il config Piper standard (JSON piccolo, ~3KB)
 ```
 
-### ⚠️ CRITICO — Solo modelli FP32 (full precision)
+### ⚠️ CRITICO — Formato del modello
 
-Sherpa-ONNX 1.12.26 (la libreria che usa la nostra app per Piper) supporta **SOLO** modelli in formato:
+Sherpa-ONNX 1.12.26 (la libreria che usa la nostra app per Piper) supporta:
 - ✅ **fp32** (float32 piena precisione) — formato standard di Piper
-- ❌ **fp16** (float16 half-precision) → errore `tensor(float16) does not match tensor(float)`
+- ✅ **fp16** (float16) — **MA SOLO se convertito correttamente** (vedi sotto)
 - ❌ **INT8/INT4 quantizzato** → errore `QuantizeLinear`/`tensor(int8)`
-- ❌ Modelli con conversione fp16 parziale → stesso errore di fp16
+- ❌ **fp16 con I/O fp16** → errore `tensor(float16) does not match tensor(float)`
+- ❌ **fp16 con conversione parziale** → stesso errore
 
 #### Come riconoscere un modello incompatibile
 
-| Dimensione | Producer name | Esito |
-|------------|--------------|-------|
-| 60-200 MB | `pytorch` | ✅ Probabilmente fp32, OK |
-| 30-100 MB | `pytorch` con `--half` | ❌ Fp16, NON funzionerà |
-| < 30 MB | `onnx.quantize` o simili | ❌ Quantizzato, NON funzionerà |
+| Dimensione | Producer name | I/O tensor types | Esito |
+|------------|--------------|------------------|-------|
+| 60-200 MB | `pytorch` | float32 | ✅ fp32 puro, OK |
+| 30-100 MB | `pytorch` (con script di conversione corretto) | float32 | ✅ fp16 corretto, OK |
+| 30-100 MB | `pytorch` `--half` | float16 | ❌ I/O fp16, sherpa rifiuta |
+| < 30 MB | `onnx.quantize` o simili | int8 | ❌ Quantizzato |
 
-#### Se il tuo modello è incompatibile
+#### Opzione A — Riesporta in fp32 puro
 
-**Opzione A — Riesporta da Piper training**:
+Se hai il `.ckpt` del training:
+
 ```bash
-# NEL pipeline Piper, esporta SENZA conversioni fp16/int8
 python -m piper_train.export_onnx \
     --checkpoint <checkpoint.ckpt> \
     --output beppe.onnx
-    # NON aggiungere --half / --fp16 / --quantize
+    # NON usare --half / --fp16 / --quantize
 ```
 
-**Opzione B — Usa un modello "stock" già testato**:
+#### Opzione B — Converti il tuo .onnx fp32 in fp16 corretto (CONSIGLIATO)
+
+Se hai un modello fp32 (60-200 MB) e vuoi ridurlo a ~50% per girare meglio su mobile:
+
+```bash
+# Dalla radice del repo, installa le dipendenze (una sola volta)
+pip install onnx onnxconverter-common onnxruntime
+
+# Converti il tuo .onnx IN-PLACE (sovrascrive l'originale solo dopo validazione)
+python scripts/convert_to_fp16.py frontend/assets/piper/beppe.onnx
+```
+
+Lo script:
+- Mantiene I/O in fp32 (compatibile sherpa-onnx)
+- Converte tutti i pesi interni a fp16 (riduzione 50%)
+- Valida con `onnx.checker` + smoke test `onnxruntime`
+- Se la validazione fallisce, l'originale resta intatto
+- Solo dopo successo sovrascrive il file (atomic replace)
+
+Output atteso:
+```
+==> Carico modello: beppe.onnx (120.3MB)
+    producer: pytorch 2.1.0
+    pesi: 245 fp32, 0 fp16
+==> Conversione a fp16 (keep_io_types=True, op_block_list=[])
+==> Scrivo temporaneo: beppe.onnx.tmp
+    dimensione: 120.3MB → 60.2MB (-50%)
+==> Validazione struttura ONNX (onnx.checker)
+    ✓ struttura valida
+==> Smoke test con onnxruntime CPU
+    inputs:  [('input', 'tensor(int64)'), ..., ('scales', 'tensor(float)'), ...]
+    outputs: [('output', 'tensor(float)')]
+    ✓ il modello carica e ha I/O fp32 corretti
+==> Sovrascrivo beppe.onnx (atomic replace)
+✓ CONVERSIONE COMPLETATA CON SUCCESSO
+```
+
+#### Opzione C — Modello "stock" Italiano già pronto
+
+Se non hai modelli custom, scarica un Piper italiano fp32 dalla repo ufficiale:
+
 ```bash
 cd frontend/assets/piper
-
-# Paola medium (~64MB fp32, garantito funzionante)
+# Paola medium (~64MB fp32, donna)
 curl -L -o beppe.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/paola/medium/it_IT-paola-medium.onnx
 curl -L -o beppe.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/paola/medium/it_IT-paola-medium.onnx.json
 
-# Riccardo x_low (~28MB fp32, voce maschile più piccola)
-# curl -L -o beppe.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/riccardo/x_low/it_IT-riccardo-x_low.onnx
-# curl -L -o beppe.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/riccardo/x_low/it_IT-riccardo-x_low.onnx.json
+# Opzionale: convertilo a fp16 per dimezzarne la dimensione (~32MB)
+cd ../../..
+python scripts/convert_to_fp16.py frontend/assets/piper/beppe.onnx
 ```
 
-Verifica:
-
-```bash
-ls -lh frontend/assets/piper/beppe.onnx          # FP32: 60-200MB
-ls -lh frontend/assets/piper/beppe.onnx.json     # ~2-5KB
-```
-
-> 💡 La nostra app **rileva automaticamente** modelli incompatibili nel pannello DIAGNOSTICA PIPER (icona ⚠ "MODELLO QUANTIZZATO" o "Modello in FP16 incompatibile"). Se vedi questo avviso, NON tentare il Test voce — sostituisci il modello prima.
+> 💡 La nostra app **rileva automaticamente** modelli incompatibili nel pannello DIAGNOSTICA PIPER. Se vedi l'avviso arancione "Modello in FP16 incompatibile" o "Modello QUANTIZZATO incompatibile", segui i suggerimenti mostrati.
 
 ---
 
