@@ -37,6 +37,7 @@
     "expo-image": "~3.0.11",
     "expo-image-picker": "~17.0.11",
     "expo-linking": "~8.0.11",
+    "expo-localization": "~17.0.8",
     "expo-pdf-text-extract": "^1.0.1",
     "expo-router": "~6.0.22",
     "expo-speech": "~14.0.8",

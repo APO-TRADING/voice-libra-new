@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 import { api, BookSummary, Folder } from '../api/client';
 import { useTheme } from '../contexts/ThemeContext';
+import { useT } from '../i18n';
 
 type Props = {
   book: BookSummary | null;
@@ -27,6 +28,7 @@ type Props = {
 
 export default function BookEditModal({ book, folders, onClose, onSaved }: Props) {
   const { colors } = useTheme();
+  const t = useT();
   const [title, setTitle] = useState('');
   const [author, setAuthor] = useState('');
   const [coverUrl, setCoverUrl] = useState('');
@@ -45,7 +47,7 @@ export default function BookEditModal({ book, folders, onClose, onSaved }: Props
   const pickCover = async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
-      Alert.alert('Permesso negato', 'Concedi accesso alla galleria.');
+      Alert.alert(t('upload.gallery.deniedTitle'), t('upload.gallery.denied'));
       return;
     }
     const res = await ImagePicker.launchImageLibraryAsync({
@@ -67,15 +69,15 @@ export default function BookEditModal({ book, folders, onClose, onSaved }: Props
 
   const submit = async () => {
     if (!book) return;
-    const t = title.trim();
-    if (!t) {
-      Alert.alert('Titolo obbligatorio', 'Inserisci almeno un titolo.');
+    const tx = title.trim();
+    if (!tx) {
+      Alert.alert(t('bookEdit.titleRequired.title'), t('bookEdit.titleRequired'));
       return;
     }
     setSaving(true);
     try {
       await api.updateBook(book.id, {
-        title: t.slice(0, 200),
+        title: tx.slice(0, 200),
         author: author.trim() || null,
         cover_url: coverUrl.trim() || null,
         folder_id: folderId,
@@ -84,7 +86,7 @@ export default function BookEditModal({ book, folders, onClose, onSaved }: Props
       onSaved();
     } catch (e: any) {
       setSaving(false);
-      Alert.alert('Errore', String(e?.message || e));
+      Alert.alert(t('common.error'), String(e?.message || e));
     }
   };
 
@@ -99,13 +101,13 @@ export default function BookEditModal({ book, folders, onClose, onSaved }: Props
             keyboardShouldPersistTaps="handled"
             contentContainerStyle={{ padding: 20, gap: 12 }}
           >
-            <Text style={[styles.modalTitle, { color: colors.textPrimary }]}>Modifica libro</Text>
+            <Text style={[styles.modalTitle, { color: colors.textPrimary }]}>{t('bookEdit.title')}</Text>
 
-            <Text style={[styles.label, { color: colors.textSecondary }]}>TITOLO</Text>
+            <Text style={[styles.label, { color: colors.textSecondary }]}>{t('bookEdit.field.title')}</Text>
             <TextInput
               value={title}
               onChangeText={setTitle}
-              placeholder="Titolo del libro"
+              placeholder={t('upload.field.title.placeholder')}
               placeholderTextColor={colors.textSecondary}
               style={[
                 styles.input,
@@ -113,11 +115,11 @@ export default function BookEditModal({ book, folders, onClose, onSaved }: Props
               ]}
             />
 
-            <Text style={[styles.label, { color: colors.textSecondary }]}>AUTORE</Text>
+            <Text style={[styles.label, { color: colors.textSecondary }]}>{t('bookEdit.field.author')}</Text>
             <TextInput
               value={author}
               onChangeText={setAuthor}
-              placeholder="Nome autore (opzionale)"
+              placeholder={t('bookEdit.field.author.placeholder')}
               placeholderTextColor={colors.textSecondary}
               style={[
                 styles.input,
@@ -125,7 +127,7 @@ export default function BookEditModal({ book, folders, onClose, onSaved }: Props
               ]}
             />
 
-            <Text style={[styles.label, { color: colors.textSecondary }]}>COPERTINA</Text>
+            <Text style={[styles.label, { color: colors.textSecondary }]}>{t('bookEdit.field.cover')}</Text>
             <View style={styles.coverRow}>
               <View style={[styles.coverPreview, { backgroundColor: colors.background, borderColor: colors.border }]}>
                 {coverUrl ? (
@@ -144,12 +146,12 @@ export default function BookEditModal({ book, folders, onClose, onSaved }: Props
                   onPress={pickCover}
                   style={[styles.smallBtn, { borderColor: colors.border, backgroundColor: colors.background }]}
                 >
-                  <Text style={[styles.smallBtnLabel, { color: colors.textPrimary }]}>Da galleria</Text>
+                  <Text style={[styles.smallBtnLabel, { color: colors.textPrimary }]}>{t('upload.field.cover.gallery')}</Text>
                 </TouchableOpacity>
                 <TextInput
                   value={coverUrl.startsWith('data:') ? '' : coverUrl}
                   onChangeText={setCoverUrl}
-                  placeholder="…oppure URL immagine"
+                  placeholder={t('upload.field.cover.url')}
                   placeholderTextColor={colors.textSecondary}
                   style={[
                     styles.input,
@@ -160,7 +162,7 @@ export default function BookEditModal({ book, folders, onClose, onSaved }: Props
               </View>
             </View>
 
-            <Text style={[styles.label, { color: colors.textSecondary }]}>CARTELLA</Text>
+            <Text style={[styles.label, { color: colors.textSecondary }]}>{t('bookEdit.field.folder')}</Text>
             <View style={styles.chips}>
               <TouchableOpacity
                 onPress={() => setFolderId(null)}
@@ -173,7 +175,7 @@ export default function BookEditModal({ book, folders, onClose, onSaved }: Props
                 ]}
               >
                 <Text style={[styles.chipLabel, { color: !folderId ? colors.primaryActive : colors.textPrimary }]}>
-                  Nessuna
+                  {t('upload.field.folder.none')}
                 </Text>
               </TouchableOpacity>
               {folders.map((f) => (
@@ -205,7 +207,7 @@ export default function BookEditModal({ book, folders, onClose, onSaved }: Props
                 onPress={onClose}
                 style={[styles.actionBtn, { borderColor: colors.border, borderWidth: 1 }]}
               >
-                <Text style={[styles.actionLabel, { color: colors.textPrimary }]}>Annulla</Text>
+                <Text style={[styles.actionLabel, { color: colors.textPrimary }]}>{t('common.cancel')}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={submit}
@@ -213,7 +215,7 @@ export default function BookEditModal({ book, folders, onClose, onSaved }: Props
                 style={[styles.actionBtn, { backgroundColor: colors.primaryActive, opacity: saving ? 0.6 : 1 }]}
               >
                 <Text style={[styles.actionLabel, { color: '#0A0A0C', fontWeight: '700' }]}>
-                  {saving ? 'Salvataggio…' : 'Salva'}
+                  {saving ? t('bookEdit.saving') : t('common.save')}
                 </Text>
               </TouchableOpacity>
             </View>

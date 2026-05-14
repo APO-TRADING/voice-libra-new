@@ -351,3 +351,59 @@ agent_communication:
       - app/(tabs)/upload.tsx (added AUTORE TextInput)
       - app/_layout.tsx (registered folders/[id] route)
       Tested via tsc --noEmit and metro bundling, no errors.
+  - agent: "main"
+    message: |
+      v6 follow-up — 4 big features completed in one session:
+
+      (1) **TTS background playback** — MediaSession API + Foreground
+          Service implementation:
+          • NEW src/.../PiperPlaybackService.kt (Foreground Service,
+            MediaSessionCompat, MediaStyle notification with Play/Pause/
+            Skip/Stop, AUDIOFOCUS_GAIN, PARTIAL_WAKE_LOCK).
+          • TTSManagerModule.kt now exposes startPlaybackSession,
+            updatePlaybackSession, stopPlaybackSession, isReady (already
+            from v5), plus addListener/removeListeners required by
+            NativeEventEmitter.
+          • PiperPlaybackService emits "piperMediaAction" (Play / Pause /
+            Next / Previous / Stop) and "piperAudioFocus" events back to
+            JS so the on-screen player and the lock-screen notification
+            stay perfectly in sync.
+          • AndroidManifest of the module now declares the <service> with
+            foregroundServiceType="mediaPlayback" + MediaButtonReceiver.
+          • build.gradle adds androidx.media:1.7.0 + core-ktx:1.13.1.
+          • app.json gains FOREGROUND_SERVICE_MEDIA_PLAYBACK +
+            POST_NOTIFICATIONS permissions.
+          • PlayerContext.tsx: hooks NativeEventEmitter for media + focus
+            events, drives startPlaybackSession on first play(), updates
+            on pause/state changes, stops on stop(); adds author/coverUrl
+            state.
+          Patch grew 1050 → 1589 lines.
+
+      (2) **Library duplicate title removed** — (tabs)/_layout.tsx now
+          uses headerShown: false; on-screen titles enlarged from 36 → 42
+          fontWeight 800 for Library / Folders / Upload / Settings.
+
+      (3) **Search bar** — BookList.tsx gains a Search-icon TextInput at
+          the top that filters by title + author (case-insensitive). The
+          manual reorder ↑/↓ controls auto-hide while a query is active
+          to avoid persisting a "filtered" order.
+
+      (4) **i18n (5 languages)** — full translation system:
+          • NEW src/i18n/locales/{it,en,es,de,fr}.ts (~80 keys each)
+          • NEW src/i18n/index.tsx — I18nProvider + useT() hook +
+            useI18n() for the language selector. Detects system locale
+            via expo-localization on first launch; user override saved
+            in AsyncStorage @beppe.locale.v1.
+          • Wired into RootLayout, TabsLayout (tab labels), index.tsx,
+            folders.tsx, folders/[id].tsx, upload.tsx, BookList.tsx,
+            BookEditModal.tsx, settings.tsx (user-facing strings only —
+            DIAGNOSTICA PIPER stays in italian for developer debugging
+            per user's request).
+          • settings.tsx gets a new LINGUA section with 6 chips:
+            🌐 AUTO + 🇮🇹 IT + 🇬🇧 EN + 🇪🇸 ES + 🇩🇪 DE + 🇫🇷 FR.
+
+      USER ACTION REQUIRED: rebuild via `eas build --platform android
+      --profile preview` to get the new foreground service + MediaSession
+      controls. Verify by playing a book then locking the screen — TTS
+      should keep going and the notification should show Play/Pause/Skip
+      controls.

@@ -1,6 +1,5 @@
-// Folder detail screen: shows the books inside a single folder using the
-// same BookList component (so play / edit / sort / reorder all work).
-// Route: /folders/<folderId>  OR  /folders/none  (for un-filed books)
+// Folder detail screen — uses the BookList component.
+// Route: /folders/<folderId>  OR  /folders/none
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { ChevronLeft, Plus } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
@@ -9,14 +8,16 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, BookSummary, Folder } from '../../src/api/client';
 import BookList from '../../src/components/BookList';
 import { useTheme } from '../../src/contexts/ThemeContext';
+import { useT } from '../../src/i18n';
 
 export default function FolderScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { colors } = useTheme();
+  const t = useT();
   const insets = useSafeAreaInsets();
   const [books, setBooks] = useState<BookSummary[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
-  const [folderName, setFolderName] = useState<string>('Senza cartella');
+  const [folderName, setFolderName] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -30,9 +31,11 @@ export default function FolderScreen() {
       ]);
       setBooks(list);
       setFolders(fs);
-      if (!isUnfiled && id) {
+      if (isUnfiled) {
+        setFolderName(t('folders.unfiled'));
+      } else if (id) {
         const f = await api.getFolder(id);
-        setFolderName(f?.name || 'Cartella');
+        setFolderName(f?.name || '—');
       }
     } catch (e) {
       console.warn('[Folder] load failed:', e);
@@ -40,7 +43,7 @@ export default function FolderScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [id, isUnfiled]);
+  }, [id, isUnfiled, t]);
 
   useEffect(() => { load(); }, [load]);
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -49,6 +52,13 @@ export default function FolderScreen() {
     setRefreshing(true);
     load();
   }, [load]);
+
+  const countLabel =
+    books.length === 0
+      ? t('library.bookCount.zero')
+      : books.length === 1
+      ? t('folders.folderCount.one', { n: books.length })
+      : t('folders.folderCount.other', { n: books.length });
 
   return (
     <View
@@ -65,13 +75,11 @@ export default function FolderScreen() {
             <ChevronLeft color={colors.textPrimary} size={20} />
           </TouchableOpacity>
           <View style={{ flex: 1 }}>
-            <Text style={[styles.eyebrow, { color: colors.textSecondary }]}>CARTELLA</Text>
+            <Text style={[styles.eyebrow, { color: colors.textSecondary }]}>{t('folders.eyebrow')}</Text>
             <Text numberOfLines={1} style={[styles.title, { color: colors.textPrimary }]}>
               {folderName}
             </Text>
-            <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
-              {books.length} {books.length === 1 ? 'libro' : 'libri'}
-            </Text>
+            <Text style={[styles.subtitle, { color: colors.textSecondary }]}>{countLabel}</Text>
           </View>
         </View>
         <TouchableOpacity
@@ -92,8 +100,8 @@ export default function FolderScreen() {
         reload={load}
         emptyMessage={
           isUnfiled
-            ? 'Nessun libro senza cartella.'
-            : `Nessun libro in "${folderName}". Aprire un libro dalla libreria e usare "Modifica" per assegnarlo a questa cartella.`
+            ? t('folders.empty.unfiled')
+            : t('folders.empty.inside', { name: folderName })
         }
       />
     </View>
@@ -125,6 +133,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   eyebrow: { fontSize: 10, fontWeight: '700', letterSpacing: 1.5 },
-  title: { fontSize: 22, fontWeight: '700', letterSpacing: -0.3, marginTop: 2 },
+  title: { fontSize: 24, fontWeight: '800', letterSpacing: -0.3, marginTop: 2 },
   subtitle: { fontSize: 12, letterSpacing: 0.3, marginTop: 2 },
 });

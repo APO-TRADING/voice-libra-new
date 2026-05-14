@@ -15,11 +15,14 @@ import {
 } from '../../src/audio/piperEngine';
 import { usePlayer } from '../../src/contexts/PlayerContext';
 import { useTheme } from '../../src/contexts/ThemeContext';
+import { SUPPORTED_LOCALES, SYSTEM, useI18n, useT } from '../../src/i18n';
 
 export default function SettingsScreen() {
   const { colors, mode, toggleMode, viewMode, setViewMode, defaultLengthScale, setDefaultLengthScale } = useTheme();
   const insets = useSafeAreaInsets();
   const { engine, piperError, piperStep } = usePlayer();
+  const t = useT();
+  const { storedChoice, setLocale } = useI18n();
   const [trace, setTrace] = useState<string>('(caricamento...)');
   const [diagResults, setDiagResults] = useState<DiagnosticItem[] | null>(null);
   const [diagRunning, setDiagRunning] = useState(false);
@@ -61,17 +64,19 @@ export default function SettingsScreen() {
       contentContainerStyle={{ paddingTop: insets.top + 8, paddingHorizontal: 24, paddingBottom: 96 }}
       testID="settings-screen"
     >
-      <Text style={[styles.title, { color: colors.textPrimary }]}>Impostazioni</Text>
+      <Text style={[styles.title, { color: colors.textPrimary }]}>{t('settings.title')}</Text>
 
-      <Text style={[styles.section, { color: colors.textSecondary }]}>ASPETTO</Text>
+      <Text style={[styles.section, { color: colors.textSecondary }]}>{t('settings.section.appearance').toUpperCase()}</Text>
       <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
         <View style={styles.row}>
           <View style={[styles.iconCircle, { backgroundColor: colors.surface2 }]}>
             {mode === 'dark' ? <Moon color={colors.primaryActive} size={18} /> : <Sun color={colors.primaryActive} size={18} />}
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={[styles.rowTitle, { color: colors.textPrimary }]}>Tema scuro</Text>
-            <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>{mode === 'dark' ? 'Attivo' : 'Disattivo'}</Text>
+            <Text style={[styles.rowTitle, { color: colors.textPrimary }]}>{t('settings.theme.label')}</Text>
+            <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>
+              {mode === 'dark' ? t('settings.theme.dark') : t('settings.theme.light')}
+            </Text>
           </View>
           <Switch
             testID="theme-switch"
@@ -84,8 +89,7 @@ export default function SettingsScreen() {
         <View style={[styles.divider, { backgroundColor: colors.border }]} />
         <View style={styles.row}>
           <View style={{ flex: 1 }}>
-            <Text style={[styles.rowTitle, { color: colors.textPrimary }]}>Visualizzazione libreria</Text>
-            <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>Predefinita</Text>
+            <Text style={[styles.rowTitle, { color: colors.textPrimary }]}>{t('settings.viewMode.label')}</Text>
           </View>
           <View style={{ flexDirection: 'row', gap: 8 }}>
             {(['grid', 'list'] as const).map((v) => (
@@ -96,7 +100,7 @@ export default function SettingsScreen() {
                 style={[styles.toggleBtn, { borderColor: viewMode === v ? colors.primaryActive : colors.border, backgroundColor: viewMode === v ? colors.surface2 : 'transparent' }]}
               >
                 <Text style={[styles.toggleLabel, { color: viewMode === v ? colors.primaryActive : colors.textSecondary }]}>
-                  {v === 'grid' ? 'Griglia' : 'Elenco'}
+                  {v === 'grid' ? t('settings.viewMode.grid') : t('settings.viewMode.list')}
                 </Text>
               </TouchableOpacity>
             ))}
@@ -104,7 +108,56 @@ export default function SettingsScreen() {
         </View>
       </View>
 
-      <Text style={[styles.section, { color: colors.textSecondary }]}>RIPRODUZIONE</Text>
+      {/* ──────────────────────────────────────────────────────────────
+         Language selector — chooses among 5 supported app locales.
+         "Sistema" = follow OS language (auto-detected at each launch).
+         ────────────────────────────────────────────────────────────── */}
+      <Text style={[styles.section, { color: colors.textSecondary }]}>{t('settings.section.language').toUpperCase()}</Text>
+      <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border, padding: 12, gap: 8 }]}>
+        <View style={styles.langGrid}>
+          <TouchableOpacity
+            testID="lang-system"
+            onPress={() => setLocale(SYSTEM)}
+            style={[
+              styles.langChip,
+              {
+                borderColor: storedChoice === SYSTEM ? colors.primaryActive : colors.border,
+                backgroundColor: storedChoice === SYSTEM ? colors.primaryActive + '22' : colors.background,
+              },
+            ]}
+          >
+            <Text style={[styles.langFlag]}>🌐</Text>
+            <Text style={[styles.langSigla, { color: storedChoice === SYSTEM ? colors.primaryActive : colors.textPrimary }]}>
+              AUTO
+            </Text>
+          </TouchableOpacity>
+
+          {SUPPORTED_LOCALES.map((l) => (
+            <TouchableOpacity
+              key={l.code}
+              testID={`lang-${l.code}`}
+              onPress={() => setLocale(l.code)}
+              style={[
+                styles.langChip,
+                {
+                  borderColor: storedChoice === l.code ? colors.primaryActive : colors.border,
+                  backgroundColor: storedChoice === l.code ? colors.primaryActive + '22' : colors.background,
+                },
+              ]}
+            >
+              <Text style={styles.langFlag}>{l.flag}</Text>
+              <Text style={[styles.langSigla, { color: storedChoice === l.code ? colors.primaryActive : colors.textPrimary }]}>
+                {l.sigla}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        <Text style={[styles.rowMeta, { color: colors.textSecondary, marginTop: 4, paddingHorizontal: 4 }]}>
+          {storedChoice === SYSTEM ? t('settings.language.system') : ''}
+        </Text>
+      </View>
+
+      <Text style={[styles.section, { color: colors.textSecondary }]}>{t('settings.section.playback').toUpperCase()}</Text>
       <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
         <View style={styles.rowCol}>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -325,7 +378,8 @@ export default function SettingsScreen() {
 
 const styles = StyleSheet.create({
   c: { flex: 1 },
-  title: { fontSize: 36, fontWeight: '700', letterSpacing: -0.5, marginBottom: 8 },
+  // PATCH (beppe-audiobooks v6): title enlarged to match the Library header.
+  title: { fontSize: 42, fontWeight: '800', letterSpacing: -0.8, marginBottom: 8 },
   section: { fontSize: 11, fontWeight: '700', letterSpacing: 1.2, marginTop: 24, marginBottom: 8, paddingHorizontal: 4 },
   card: { borderRadius: 20, borderWidth: 1, paddingHorizontal: 16, paddingVertical: 8 },
   row: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 14 },
@@ -337,4 +391,19 @@ const styles = StyleSheet.create({
   toggleBtn: { paddingHorizontal: 14, height: 36, borderRadius: 999, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
   toggleLabel: { fontSize: 13, fontWeight: '600' },
   footer: { fontSize: 11, textAlign: 'center', marginTop: 32, letterSpacing: 0.5 },
+  // Language selector
+  langGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  langChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    height: 44,
+    borderRadius: 12,
+    borderWidth: 1,
+    minWidth: 78,
+    justifyContent: 'center',
+  },
+  langFlag: { fontSize: 20 },
+  langSigla: { fontSize: 13, fontWeight: '700', letterSpacing: 0.5 },
 });

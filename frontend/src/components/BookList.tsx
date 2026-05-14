@@ -1,7 +1,4 @@
-// Reusable book grid/list with sort controls + per-row long-press menu.
-// Used by:
-//   - app/(tabs)/index.tsx        (whole library)
-//   - app/folders/[id].tsx        (single folder)
+// Reusable book grid/list with search + sort controls + per-row long-press menu.
 import { router } from 'expo-router';
 import {
   ArrowDownAZ,
@@ -15,12 +12,15 @@ import {
   List as ListIcon,
   MoreVertical,
   Play,
+  Search,
   Trash2,
   UserCircle,
+  X,
 } from 'lucide-react-native';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Image,
   Modal,
@@ -28,11 +28,13 @@ import {
   RefreshControl,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
 import { api, BookSummary, Folder, SortMode } from '../api/client';
 import { useTheme } from '../contexts/ThemeContext';
+import { useT } from '../i18n';
 import BookEditModal from './BookEditModal';
 
 const FALLBACK_COVERS = [
@@ -59,8 +61,6 @@ type Props = {
   refreshing: boolean;
   onRefresh: () => void;
   reload: () => void;
-  // When true, the FlatList contentContainerStyle gets a top padding
-  // appropriate for an embedded screen.
   emptyMessage?: string;
 };
 
@@ -71,33 +71,41 @@ export default function BookList({
   refreshing,
   onRefresh,
   reload,
-  emptyMessage = 'Nessun libro trovato.',
+  emptyMessage,
 }: Props) {
   const { colors, viewMode, setViewMode } = useTheme();
+  const t = useT();
   const [sortMode, setSortModeLocal] = useState<SortMode>('recent');
   const [manualMode, setManualMode] = useState(false);
   const [actionFor, setActionFor] = useState<BookSummary | null>(null);
   const [editFor, setEditFor] = useState<BookSummary | null>(null);
+  const [query, setQuery] = useState('');
 
-  // hydrate sort mode from storage once
-  useMemo(() => {
+  useEffect(() => {
     api.getSortMode().then((m) => {
       setSortModeLocal(m);
       setManualMode(m === 'manual');
     });
   }, []);
 
-  // ─── client-side sort to avoid re-fetching after mutation ─────────
+  // ─── client-side filter + sort ─────────────────────────
+  const filteredBooks = useMemo(() => {
+    if (!query.trim()) return books;
+    const q = query.trim().toLowerCase();
+    return books.filter((b) => {
+      const haystack = `${b.title} ${b.author || ''}`.toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [books, query]);
+
   const sortedBooks = useMemo(() => {
-    const arr = [...books];
+    const arr = [...filteredBooks];
     switch (sortMode) {
       case 'manual':
         arr.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
         break;
       case 'title':
-        arr.sort((a, b) =>
-          a.title.localeCompare(b.title, 'it', { sensitivity: 'base' }),
-        );
+        arr.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
         break;
       case 'author':
         arr.sort((a, b) => {
@@ -105,9 +113,9 @@ export default function BookList({
           const bb = (b.author || '').trim();
           if (!aa && bb) return 1;
           if (aa && !bb) return -1;
-          const c = aa.localeCompare(bb, 'it', { sensitivity: 'base' });
+          const c = aa.localeCompare(bb, undefined, { sensitivity: 'base' });
           if (c !== 0) return c;
-          return a.title.localeCompare(b.title, 'it', { sensitivity: 'base' });
+          return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' });
         });
         break;
       case 'recent':
@@ -115,7 +123,7 @@ export default function BookList({
         arr.sort((a, b) => (b.updated_at < a.updated_at ? -1 : 1));
     }
     return arr;
-  }, [books, sortMode]);
+  }, [filteredBooks, sortMode]);
 
   const persistMode = useCallback(async (m: SortMode) => {
     setSortModeLocal(m);
@@ -125,7 +133,6 @@ export default function BookList({
 
   const moveBook = useCallback(
     async (id: string, direction: -1 | 1) => {
-      // operate on the CURRENT (manual-sorted) list view
       const list = [...sortedBooks];
       const i = list.findIndex((b) => b.id === id);
       if (i < 0) return;
@@ -145,59 +152,94 @@ export default function BookList({
 
   const closeAction = () => setActionFor(null);
 
-  const handleDelete = async (b: BookSummary) => {
-    try {
-      await api.deleteBook(b.id);
-      reload();
-    } catch (e) {
-      console.warn(e);
-    }
+  const handleDelete = (b: BookSummary) => {
+    Alert.alert(
+      t('library.book.delete.confirmTitle'),
+      t('library.book.delete.confirmBody', { title: b.title }),
+      [
+        { text: t('common.cancel'), style: 'cancel' },
+        {
+          text: t('common.delete'),
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await api.deleteBook(b.id);
+              reload();
+            } catch (e) {
+              console.warn(e);
+            }
+          },
+        },
+      ],
+    );
   };
 
-  // ─── header (sort + view-mode toggles) ────────────────────────────
+  // ─── Header (search + sort + view-mode) ────────────────
   const Header = (
     <View style={styles.toolbar}>
-      <View style={styles.sortChips}>
-        <SortChip
-          icon={<Clock color={sortMode === 'recent' ? colors.primaryActive : colors.textSecondary} size={14} />}
-          label="Recenti"
-          active={sortMode === 'recent'}
-          onPress={() => persistMode('recent')}
-          colors={colors}
+      <View style={[styles.searchBox, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+        <Search color={colors.textSecondary} size={16} />
+        <TextInput
+          testID="library-search-input"
+          value={query}
+          onChangeText={setQuery}
+          placeholder={t('library.search.placeholder')}
+          placeholderTextColor={colors.textSecondary}
+          autoCorrect={false}
+          autoCapitalize="none"
+          returnKeyType="search"
+          style={[styles.searchInput, { color: colors.textPrimary }]}
         />
-        <SortChip
-          icon={<ArrowDownAZ color={sortMode === 'title' ? colors.primaryActive : colors.textSecondary} size={14} />}
-          label="Titolo"
-          active={sortMode === 'title'}
-          onPress={() => persistMode('title')}
-          colors={colors}
-        />
-        <SortChip
-          icon={<UserCircle color={sortMode === 'author' ? colors.primaryActive : colors.textSecondary} size={14} />}
-          label="Autore"
-          active={sortMode === 'author'}
-          onPress={() => persistMode('author')}
-          colors={colors}
-        />
-        <SortChip
-          icon={<ArrowDownUp color={sortMode === 'manual' ? colors.primaryActive : colors.textSecondary} size={14} />}
-          label="Manuale"
-          active={sortMode === 'manual'}
-          onPress={() => persistMode('manual')}
-          colors={colors}
-        />
+        {query.length > 0 ? (
+          <TouchableOpacity onPress={() => setQuery('')} hitSlop={8}>
+            <X color={colors.textSecondary} size={16} />
+          </TouchableOpacity>
+        ) : null}
       </View>
-      <TouchableOpacity
-        testID="library-view-toggle"
-        onPress={() => setViewMode(viewMode === 'grid' ? 'list' : 'grid')}
-        style={[styles.iconBtn, { borderColor: colors.border }]}
-      >
-        {viewMode === 'grid' ? (
-          <ListIcon color={colors.textSecondary} size={18} />
-        ) : (
-          <Grid3x3 color={colors.textSecondary} size={18} />
-        )}
-      </TouchableOpacity>
+
+      <View style={styles.controlsRow}>
+        <View style={styles.sortChips}>
+          <SortChip
+            icon={<Clock color={sortMode === 'recent' ? colors.primaryActive : colors.textSecondary} size={14} />}
+            label={t('library.sort.recent')}
+            active={sortMode === 'recent'}
+            onPress={() => persistMode('recent')}
+            colors={colors}
+          />
+          <SortChip
+            icon={<ArrowDownAZ color={sortMode === 'title' ? colors.primaryActive : colors.textSecondary} size={14} />}
+            label={t('library.sort.title')}
+            active={sortMode === 'title'}
+            onPress={() => persistMode('title')}
+            colors={colors}
+          />
+          <SortChip
+            icon={<UserCircle color={sortMode === 'author' ? colors.primaryActive : colors.textSecondary} size={14} />}
+            label={t('library.sort.author')}
+            active={sortMode === 'author'}
+            onPress={() => persistMode('author')}
+            colors={colors}
+          />
+          <SortChip
+            icon={<ArrowDownUp color={sortMode === 'manual' ? colors.primaryActive : colors.textSecondary} size={14} />}
+            label={t('library.sort.manual')}
+            active={sortMode === 'manual'}
+            onPress={() => persistMode('manual')}
+            colors={colors}
+          />
+        </View>
+        <TouchableOpacity
+          testID="library-view-toggle"
+          onPress={() => setViewMode(viewMode === 'grid' ? 'list' : 'grid')}
+          style={[styles.iconBtn, { borderColor: colors.border }]}
+        >
+          {viewMode === 'grid' ? (
+            <ListIcon color={colors.textSecondary} size={18} />
+          ) : (
+            <Grid3x3 color={colors.textSecondary} size={18} />
+          )}
+        </TouchableOpacity>
+      </View>
     </View>
   );
 
@@ -209,12 +251,17 @@ export default function BookList({
     );
   }
 
+  const emptyText =
+    query.trim().length > 0
+      ? t('library.empty.search')
+      : emptyMessage || t('library.empty.generic');
+
   if (!sortedBooks.length) {
     return (
       <View style={{ flex: 1 }}>
         {Header}
         <View style={styles.center}>
-          <Text style={[styles.emptyText, { color: colors.textSecondary }]}>{emptyMessage}</Text>
+          <Text style={[styles.emptyText, { color: colors.textSecondary }]}>{emptyText}</Text>
         </View>
       </View>
     );
@@ -231,6 +278,7 @@ export default function BookList({
           keyExtractor={(b) => b.id}
           columnWrapperStyle={{ gap: 16, paddingHorizontal: 24 }}
           contentContainerStyle={{ gap: 24, paddingVertical: 16, paddingBottom: 96 }}
+          keyboardShouldPersistTaps="handled"
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primaryActive} />
           }
@@ -264,11 +312,11 @@ export default function BookList({
                   </Text>
                 ) : null}
                 <Text style={[styles.gridMeta, { color: colors.textSecondary }]}>
-                  {progressPct(item)}% • {item.sentence_count} frasi
+                  {t('library.book.progress', { percent: progressPct(item), count: item.sentence_count })}
                 </Text>
               </TouchableOpacity>
 
-              {manualMode ? (
+              {manualMode && !query.trim() ? (
                 <View style={styles.gridReorder}>
                   <TouchableOpacity
                     disabled={index === 0}
@@ -304,6 +352,7 @@ export default function BookList({
           data={sortedBooks}
           keyExtractor={(b) => b.id}
           contentContainerStyle={{ paddingHorizontal: 24, paddingBottom: 96, gap: 12, paddingTop: 8 }}
+          keyboardShouldPersistTaps="handled"
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primaryActive} />
           }
@@ -326,7 +375,7 @@ export default function BookList({
                   </Text>
                 ) : null}
                 <Text style={[styles.gridMeta, { color: colors.textSecondary }]}>
-                  {progressPct(item)}% • {item.word_count} parole
+                  {t('library.book.wordCount', { percent: progressPct(item), count: item.word_count })}
                 </Text>
                 <View style={[styles.progressTrack, { backgroundColor: colors.border, marginTop: 2 }]}>
                   <View
@@ -337,7 +386,7 @@ export default function BookList({
                   />
                 </View>
               </View>
-              {manualMode ? (
+              {manualMode && !query.trim() ? (
                 <View style={{ gap: 4 }}>
                   <TouchableOpacity
                     disabled={index === 0}
@@ -376,7 +425,6 @@ export default function BookList({
         />
       )}
 
-      {/* ─── Long-press action sheet ──────────────────────────── */}
       <Modal transparent visible={!!actionFor} animationType="fade" onRequestClose={closeAction}>
         <Pressable style={styles.sheetBg} onPress={closeAction}>
           <Pressable
@@ -401,7 +449,7 @@ export default function BookList({
               }}
             >
               <Play color={colors.primaryActive} size={18} fill={colors.primaryActive} />
-              <Text style={[styles.sheetRowLabel, { color: colors.textPrimary }]}>Riproduci</Text>
+              <Text style={[styles.sheetRowLabel, { color: colors.textPrimary }]}>{t('common.play')}</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -413,19 +461,19 @@ export default function BookList({
               }}
             >
               <Edit3 color={colors.textSecondary} size={18} />
-              <Text style={[styles.sheetRowLabel, { color: colors.textPrimary }]}>Modifica</Text>
+              <Text style={[styles.sheetRowLabel, { color: colors.textPrimary }]}>{t('common.edit')}</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               style={styles.sheetRow}
-              onPress={async () => {
+              onPress={() => {
                 const b = actionFor!;
                 closeAction();
                 handleDelete(b);
               }}
             >
               <Trash2 color={colors.danger} size={18} />
-              <Text style={[styles.sheetRowLabel, { color: colors.danger }]}>Elimina libro</Text>
+              <Text style={[styles.sheetRowLabel, { color: colors.danger }]}>{t('common.delete')}</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -433,14 +481,13 @@ export default function BookList({
               onPress={closeAction}
             >
               <Text style={[styles.sheetRowLabel, { color: colors.textSecondary, fontWeight: '600' }]}>
-                Annulla
+                {t('common.cancel')}
               </Text>
             </TouchableOpacity>
           </Pressable>
         </Pressable>
       </Modal>
 
-      {/* ─── Edit modal ──────────────────────────────────────── */}
       <BookEditModal
         book={editFor}
         folders={folders}
@@ -479,9 +526,7 @@ function SortChip({
       ]}
     >
       {icon}
-      <Text
-        style={[styles.chipLabel, { color: active ? colors.primaryActive : colors.textSecondary }]}
-      >
+      <Text style={[styles.chipLabel, { color: active ? colors.primaryActive : colors.textSecondary }]}>
         {label}
       </Text>
       {active ? <Check color={colors.primaryActive} size={12} /> : null}
@@ -491,12 +536,21 @@ function SortChip({
 
 const styles = StyleSheet.create({
   toolbar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
+    gap: 10,
     paddingHorizontal: 24,
     paddingBottom: 8,
   },
+  searchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    height: 42,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  searchInput: { flex: 1, fontSize: 14, paddingVertical: 0 },
+  controlsRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   sortChips: {
     flex: 1,
     flexDirection: 'row',

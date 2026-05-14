@@ -19,11 +19,13 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, Folder } from '../../src/api/client';
 import { useTheme } from '../../src/contexts/ThemeContext';
+import { useT } from '../../src/i18n';
 
 type PickedFile = { uri: string; name: string; mimeType?: string; size?: number };
 
 export default function UploadScreen() {
   const { colors } = useTheme();
+  const t = useT();
   const insets = useSafeAreaInsets();
   const [file, setFile] = useState<PickedFile | null>(null);
   const [title, setTitle] = useState('');
@@ -58,7 +60,7 @@ export default function UploadScreen() {
   const pickCover = async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
-      Alert.alert('Permesso negato', 'Concedi accesso alla galleria per scegliere una copertina.');
+      Alert.alert(t('upload.gallery.deniedTitle'), t('upload.gallery.denied'));
       return;
     }
     const res = await ImagePicker.launchImageLibraryAsync({
@@ -80,7 +82,7 @@ export default function UploadScreen() {
 
   const submit = async () => {
     if (!file) {
-      Alert.alert('File mancante', 'Seleziona un eBook (PDF, EPUB, DOCX o TXT).');
+      Alert.alert(t('upload.missing.title'), t('upload.missing'));
       return;
     }
     setBusy(true);
@@ -92,10 +94,10 @@ export default function UploadScreen() {
         folder_id: folderId,
       });
       setBusy(false);
-      Alert.alert('Caricato', `"${book.title}" aggiunto alla libreria.`, [
-        { text: 'Riproduci', onPress: () => router.replace(`/player/${book.id}`) },
+      Alert.alert(t('upload.done.title'), t('upload.done.body', { title: book.title }), [
+        { text: t('common.play'), onPress: () => router.replace(`/player/${book.id}`) },
         {
-          text: 'OK',
+          text: t('common.ok'),
           style: 'cancel',
           onPress: () => {
             setFile(null);
@@ -108,7 +110,7 @@ export default function UploadScreen() {
       ]);
     } catch (e: any) {
       setBusy(false);
-      Alert.alert('Errore', String(e?.message || e));
+      Alert.alert(t('common.error'), String(e?.message || e));
     }
   };
 
@@ -120,9 +122,9 @@ export default function UploadScreen() {
         keyboardShouldPersistTaps="handled"
         testID="upload-screen"
       >
-        <Text style={[styles.title, { color: colors.textPrimary }]}>Carica</Text>
+        <Text style={[styles.title, { color: colors.textPrimary }]}>{t('upload.title')}</Text>
         <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
-          PDF, EPUB, DOCX o TXT — estrazione e pulizia tutto offline sul dispositivo.
+          {t('upload.subtitle')}
         </Text>
 
         <TouchableOpacity
@@ -135,34 +137,34 @@ export default function UploadScreen() {
             <FileText color={colors.primaryActive} size={28} />
           </View>
           <Text style={[styles.dropTitle, { color: colors.textPrimary }]}>
-            {file ? file.name : 'Tocca per selezionare un file'}
+            {file ? file.name : t('upload.pick.placeholder')}
           </Text>
           <Text style={[styles.dropMeta, { color: colors.textSecondary }]}>
-            {file ? `${((file.size || 0) / 1024).toFixed(0)} KB` : '.pdf .epub .docx .txt (offline)'}
+            {file ? `${((file.size || 0) / 1024).toFixed(0)} KB` : t('upload.pick.hint')}
           </Text>
         </TouchableOpacity>
 
-        <Text style={[styles.label, { color: colors.textSecondary }]}>TITOLO</Text>
+        <Text style={[styles.label, { color: colors.textSecondary }]}>{t('upload.field.title')}</Text>
         <TextInput
           testID="upload-title-input"
           value={title}
           onChangeText={setTitle}
-          placeholder="Titolo del libro"
+          placeholder={t('upload.field.title.placeholder')}
           placeholderTextColor={colors.textSecondary}
           style={[styles.input, { color: colors.textPrimary, borderColor: colors.border, backgroundColor: colors.surface }]}
         />
 
-        <Text style={[styles.label, { color: colors.textSecondary }]}>AUTORE</Text>
+        <Text style={[styles.label, { color: colors.textSecondary }]}>{t('upload.field.author')}</Text>
         <TextInput
           testID="upload-author-input"
           value={author}
           onChangeText={setAuthor}
-          placeholder="Nome autore (opzionale, utile per filtrare)"
+          placeholder={t('upload.field.author.placeholder')}
           placeholderTextColor={colors.textSecondary}
           style={[styles.input, { color: colors.textPrimary, borderColor: colors.border, backgroundColor: colors.surface }]}
         />
 
-        <Text style={[styles.label, { color: colors.textSecondary }]}>COPERTINA</Text>
+        <Text style={[styles.label, { color: colors.textSecondary }]}>{t('upload.field.cover')}</Text>
         <View style={styles.coverRow}>
           <View style={[styles.coverPreview, { backgroundColor: colors.surface, borderColor: colors.border }]}>
             {coverUrl ? (
@@ -182,13 +184,13 @@ export default function UploadScreen() {
               onPress={pickCover}
               style={[styles.smallBtn, { borderColor: colors.border, backgroundColor: colors.surface }]}
             >
-              <Text style={[styles.smallBtnLabel, { color: colors.textPrimary }]}>Da galleria</Text>
+              <Text style={[styles.smallBtnLabel, { color: colors.textPrimary }]}>{t('upload.field.cover.gallery')}</Text>
             </TouchableOpacity>
             <TextInput
               testID="cover-url-input"
               value={coverUrl.startsWith('data:') ? '' : coverUrl}
               onChangeText={setCoverUrl}
-              placeholder="…oppure URL immagine"
+              placeholder={t('upload.field.cover.url')}
               placeholderTextColor={colors.textSecondary}
               style={[styles.input, { color: colors.textPrimary, borderColor: colors.border, backgroundColor: colors.surface, marginBottom: 0 }]}
               autoCapitalize="none"
@@ -196,14 +198,14 @@ export default function UploadScreen() {
           </View>
         </View>
 
-        <Text style={[styles.label, { color: colors.textSecondary }]}>CARTELLA (FACOLTATIVO)</Text>
+        <Text style={[styles.label, { color: colors.textSecondary }]}>{t('upload.field.folder')}</Text>
         <View style={styles.chips}>
           <TouchableOpacity
             testID="folder-chip-none"
             onPress={() => setFolderId(undefined)}
             style={[styles.chip, { borderColor: !folderId ? colors.primaryActive : colors.border, backgroundColor: colors.surface }]}
           >
-            <Text style={[styles.chipLabel, { color: !folderId ? colors.primaryActive : colors.textPrimary }]}>Nessuna</Text>
+            <Text style={[styles.chipLabel, { color: !folderId ? colors.primaryActive : colors.textPrimary }]}>{t('upload.field.folder.none')}</Text>
           </TouchableOpacity>
           {folders.map((f) => (
             <TouchableOpacity
@@ -226,7 +228,7 @@ export default function UploadScreen() {
           {busy ? <ActivityIndicator color="#0A0A0C" /> : (
             <>
               <UploadIcon color="#0A0A0C" size={18} />
-              <Text style={[styles.submitLabel, { color: '#0A0A0C' }]}>Carica nella libreria</Text>
+              <Text style={[styles.submitLabel, { color: '#0A0A0C' }]}>{t('upload.submit')}</Text>
             </>
           )}
         </TouchableOpacity>
@@ -237,7 +239,8 @@ export default function UploadScreen() {
 
 const styles = StyleSheet.create({
   c: { flex: 1 },
-  title: { fontSize: 36, fontWeight: '700', letterSpacing: -0.5 },
+  // PATCH (beppe-audiobooks v6): title enlarged to match the Library header.
+  title: { fontSize: 42, fontWeight: '800', letterSpacing: -0.8 },
   subtitle: { fontSize: 14, marginTop: 4, marginBottom: 24, lineHeight: 20 },
   dropzone: { borderRadius: 24, borderWidth: 1.5, borderStyle: 'dashed', alignItems: 'center', paddingVertical: 28, gap: 8, marginBottom: 24 },
   dropIcon: { width: 64, height: 64, borderRadius: 999, alignItems: 'center', justifyContent: 'center', marginBottom: 4 },

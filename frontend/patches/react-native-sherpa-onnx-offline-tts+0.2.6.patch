@@ -1,5 +1,5 @@
 diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle b/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
-index f2fd70a..9c6c9c1 100644
+index f2fd70a..e671964 100644
 --- a/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
 +++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
 @@ -86,6 +86,12 @@ android {
@@ -15,7 +15,7 @@ index f2fd70a..9c6c9c1 100644
    flatDir {
          dirs 'libs' // Specifies the 'libs' directory for local AARs
      }
-@@ -93,18 +99,15 @@ repositories {
+@@ -93,18 +99,21 @@ repositories {
  
  def kotlin_version = getExtOrDefault("kotlinVersion")
  
@@ -33,12 +33,58 @@ index f2fd70a..9c6c9c1 100644
 -  // implementation(name:'sherpa-onnx-1.10.35.aar', ext:'aar')
 +  // PATCH (beppe-audiobooks): upgraded local 1.10.35 -> JitPack 1.12.26
 +  implementation 'com.github.k2-fsa:sherpa-onnx:1.12.26'
++  // PATCH (beppe-audiobooks v6): androidx.media for MediaSessionCompat +
++  // MediaStyle notification. Allows the TTS to expose lock-screen play /
++  // pause / skip controls AND keep playing with the screen off via a
++  // foreground service.
++  implementation 'androidx.media:media:1.7.0'
++  implementation 'androidx.core:core-ktx:1.13.1'
 +  // implementation files('libs/sherpa-onnx-1.10.35.aar')
  }
  
  
+diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/AndroidManifest.xml b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/AndroidManifest.xml
+index f84aae3..e479f51 100644
+--- a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/AndroidManifest.xml
++++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/AndroidManifest.xml
+@@ -1,3 +1,35 @@
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+           package="com.sherpaonnxofflinetts">
++
++    <!--
++       PATCH (beppe-audiobooks v6): permissions and foreground service
++       declarations needed for "TTS-like-the-device" behavior:
++       continuous playback with screen off + lock-screen media controls.
++    -->
++    <uses-permission android:name="android.permission.WAKE_LOCK"/>
++    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
++    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
++    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
++
++    <application>
++        <service
++            android:name=".PiperPlaybackService"
++            android:enabled="true"
++            android:exported="false"
++            android:foregroundServiceType="mediaPlayback">
++            <intent-filter>
++                <action android:name="android.media.browse.MediaBrowserService"/>
++            </intent-filter>
++        </service>
++
++        <!-- Receiver used to translate MediaSession transport actions into
++             the internal Service. Required for MediaButtonReceiver to
++             route media-key events properly on Android 13+. -->
++        <receiver android:name="androidx.media.session.MediaButtonReceiver"
++                  android:exported="true">
++            <intent-filter>
++                <action android:name="android.intent.action.MEDIA_BUTTON"/>
++            </intent-filter>
++        </receiver>
++    </application>
+ </manifest>
 diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt
-index 4fdaf4a..b0078f2 100644
+index 4fdaf4a..9980342 100644
 --- a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt
 +++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/AudioPlayer.kt
 @@ -1,14 +1,37 @@
@@ -543,8 +589,422 @@ index 4fdaf4a..b0078f2 100644
          if (!isRunning) {
              start() // starts AudioTrack + thread + volume timer
          }
+diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/PiperPlaybackService.kt b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/PiperPlaybackService.kt
+new file mode 100644
+index 0000000..d82e503
+--- /dev/null
++++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/PiperPlaybackService.kt
+@@ -0,0 +1,408 @@
++package com.sherpaonnxofflinetts
++
++import android.app.Notification
++import android.app.NotificationChannel
++import android.app.NotificationManager
++import android.app.PendingIntent
++import android.app.Service
++import android.content.Context
++import android.content.Intent
++import android.content.pm.ServiceInfo
++import android.graphics.Bitmap
++import android.graphics.BitmapFactory
++import android.media.AudioManager
++import android.os.Binder
++import android.os.Build
++import android.os.IBinder
++import android.os.PowerManager
++import android.support.v4.media.MediaMetadataCompat
++import android.support.v4.media.session.MediaSessionCompat
++import android.support.v4.media.session.PlaybackStateCompat
++import android.util.Base64
++import android.util.Log
++import androidx.core.app.NotificationCompat
++import androidx.media.session.MediaButtonReceiver
++import com.facebook.react.bridge.Arguments
++import com.facebook.react.bridge.ReactApplicationContext
++import com.facebook.react.modules.core.DeviceEventManagerModule
++
++/**
++ * PATCH (beppe-audiobooks v6): Foreground Service that keeps the TTS engine
++ * alive when the screen turns off and surfaces a MediaSession-styled
++ * notification with Play / Pause controls on the lock-screen. This is what
++ * makes the Piper TTS behave "exactly like the device's default voice":
++ *
++ *   1. The user presses Play → JS calls startService(playbackInfo).
++ *   2. We acquire a PARTIAL_WAKE_LOCK so the CPU keeps decoding even when
++ *      the device dims.
++ *   3. We request AUDIOFOCUS_GAIN (mediaplayer style) so calls / Spotify
++ *      duck or pause us correctly.
++ *   4. We post a MediaStyle notification — tapping its actions emits
++ *      DeviceEventEmitter events back to JS so PlayerContext can run the
++ *      same code path as the on-screen Play/Pause buttons.
++ *   5. When JS calls stopService(), the wake-lock is released, the
++ *      notification dismissed, and audio focus given back.
++ *
++ * The Service IS NOT a singleton; it's started fresh each time a book starts
++ * playing. The TTSManagerModule.kt is what calls startService(...) /
++ * stopService() through Context.
++ */
++class PiperPlaybackService : Service() {
++    companion object {
++        private const val TAG = "PiperPlaybackSvc"
++        const val ACTION_PLAY = "com.sherpaonnxofflinetts.action.PLAY"
++        const val ACTION_PAUSE = "com.sherpaonnxofflinetts.action.PAUSE"
++        const val ACTION_NEXT = "com.sherpaonnxofflinetts.action.NEXT"
++        const val ACTION_PREVIOUS = "com.sherpaonnxofflinetts.action.PREVIOUS"
++        const val ACTION_STOP = "com.sherpaonnxofflinetts.action.STOP"
++
++        const val EXTRA_TITLE = "title"
++        const val EXTRA_AUTHOR = "author"
++        const val EXTRA_COVER_BASE64 = "coverBase64"
++        const val EXTRA_IS_PLAYING = "isPlaying"
++
++        private const val CHANNEL_ID = "piper-playback"
++        private const val CHANNEL_NAME = "Audiobook playback"
++        private const val NOTIFICATION_ID = 1729
++
++        // Static reference so the singleton ReactContext / module instance can
++        // talk to the live service without juggling binders. Cleared in
++        // onDestroy().
++        @Volatile var instance: PiperPlaybackService? = null
++
++        // Static handle to the React context — set by TTSManagerModule.init()
++        // — so the service can push events back to JS.
++        @Volatile var reactContext: ReactApplicationContext? = null
++    }
++
++    private var mediaSession: MediaSessionCompat? = null
++    private var wakeLock: PowerManager.WakeLock? = null
++    private var audioFocusListener: AudioManager.OnAudioFocusChangeListener? = null
++    private var currentTitle: String = "Audiobook"
++    private var currentAuthor: String = ""
++    private var currentCoverBitmap: Bitmap? = null
++    private var isPlaying: Boolean = true
++
++    private val binder = LocalBinder()
++
++    inner class LocalBinder : Binder() {
++        fun getService(): PiperPlaybackService = this@PiperPlaybackService
++    }
++
++    override fun onBind(intent: Intent?): IBinder = binder
++
++    override fun onCreate() {
++        super.onCreate()
++        Log.d(TAG, "onCreate")
++        instance = this
++        ensureChannel()
++        setupMediaSession()
++        acquireWakeLock()
++        requestAudioFocus()
++    }
++
++    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
++        Log.d(TAG, "onStartCommand action=${intent?.action}")
++
++        when (intent?.action) {
++            ACTION_PLAY -> handleMediaButton(ACTION_PLAY)
++            ACTION_PAUSE -> handleMediaButton(ACTION_PAUSE)
++            ACTION_NEXT -> handleMediaButton(ACTION_NEXT)
++            ACTION_PREVIOUS -> handleMediaButton(ACTION_PREVIOUS)
++            ACTION_STOP -> {
++                handleMediaButton(ACTION_STOP)
++                stopSelf()
++                return START_NOT_STICKY
++            }
++            else -> {
++                // Initial start with playback metadata
++                intent?.let { extractMetadata(it) }
++            }
++        }
++
++        // (Re-)post the foreground notification with the current metadata.
++        try {
++            val notif = buildNotification()
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
++                startForeground(
++                    NOTIFICATION_ID,
++                    notif,
++                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
++                )
++            } else {
++                startForeground(NOTIFICATION_ID, notif)
++            }
++        } catch (e: Throwable) {
++            Log.e(TAG, "startForeground threw: ${e.javaClass.simpleName}: ${e.message}")
++        }
++
++        return START_STICKY
++    }
++
++    private fun extractMetadata(intent: Intent) {
++        currentTitle = intent.getStringExtra(EXTRA_TITLE) ?: currentTitle
++        currentAuthor = intent.getStringExtra(EXTRA_AUTHOR) ?: currentAuthor
++        isPlaying = intent.getBooleanExtra(EXTRA_IS_PLAYING, true)
++        val coverB64 = intent.getStringExtra(EXTRA_COVER_BASE64)
++        if (coverB64 != null && coverB64.isNotEmpty()) {
++            currentCoverBitmap = decodeCover(coverB64)
++        }
++        updateMediaSessionMetadata()
++        updatePlaybackState()
++    }
++
++    private fun decodeCover(b64: String): Bitmap? {
++        return try {
++            // Strip optional `data:image/jpeg;base64,` prefix
++            val raw = if (b64.startsWith("data:")) b64.substringAfter(",") else b64
++            val bytes = Base64.decode(raw, Base64.DEFAULT)
++            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
++        } catch (e: Throwable) {
++            Log.w(TAG, "cover decode failed: ${e.message}")
++            null
++        }
++    }
++
++    fun updateState(title: String, author: String?, isPlaying: Boolean, coverBase64: String?) {
++        this.currentTitle = title.ifBlank { "Audiobook" }
++        this.currentAuthor = author ?: ""
++        this.isPlaying = isPlaying
++        if (coverBase64 != null && coverBase64.isNotEmpty()) {
++            this.currentCoverBitmap = decodeCover(coverBase64)
++        }
++        updateMediaSessionMetadata()
++        updatePlaybackState()
++        // Re-post the notification
++        try {
++            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
++            nm.notify(NOTIFICATION_ID, buildNotification())
++        } catch (_: Throwable) { }
++    }
++
++    private fun setupMediaSession() {
++        val session = MediaSessionCompat(this, "PiperPlaybackSession")
++        session.setFlags(
++            MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
++                MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
++        )
++        session.setCallback(object : MediaSessionCompat.Callback() {
++            override fun onPlay() { handleMediaButton(ACTION_PLAY) }
++            override fun onPause() { handleMediaButton(ACTION_PAUSE) }
++            override fun onSkipToNext() { handleMediaButton(ACTION_NEXT) }
++            override fun onSkipToPrevious() { handleMediaButton(ACTION_PREVIOUS) }
++            override fun onStop() { handleMediaButton(ACTION_STOP) }
++        })
++        session.isActive = true
++        mediaSession = session
++        updateMediaSessionMetadata()
++        updatePlaybackState()
++    }
++
++    private fun updateMediaSessionMetadata() {
++        val md = MediaMetadataCompat.Builder()
++            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, currentTitle)
++            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, currentAuthor)
++            .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, currentTitle)
++            .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, currentAuthor)
++        currentCoverBitmap?.let { md.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, it) }
++        mediaSession?.setMetadata(md.build())
++    }
++
++    private fun updatePlaybackState() {
++        val state = if (isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
++        val pb = PlaybackStateCompat.Builder()
++            .setActions(
++                PlaybackStateCompat.ACTION_PLAY or
++                    PlaybackStateCompat.ACTION_PAUSE or
++                    PlaybackStateCompat.ACTION_PLAY_PAUSE or
++                    PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
++                    PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
++                    PlaybackStateCompat.ACTION_STOP
++            )
++            .setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
++            .build()
++        mediaSession?.setPlaybackState(pb)
++    }
++
++    private fun buildNotification(): Notification {
++        val ctx = applicationContext
++        val sessionToken = mediaSession?.sessionToken
++
++        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
++        val contentPi = if (launchIntent != null) PendingIntent.getActivity(
++            ctx, 0, launchIntent,
++            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
++        ) else null
++
++        val builder = NotificationCompat.Builder(ctx, CHANNEL_ID)
++            .setContentTitle(currentTitle)
++            .setContentText(currentAuthor.ifBlank { "Audiobook" })
++            .setSmallIcon(android.R.drawable.ic_media_play)
++            .setOnlyAlertOnce(true)
++            .setShowWhen(false)
++            .setOngoing(isPlaying)
++            .setPriority(NotificationCompat.PRIORITY_LOW)
++            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
++            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
++            .setContentIntent(contentPi)
++            .setDeleteIntent(buildActionPendingIntent(ACTION_STOP))
++
++        currentCoverBitmap?.let { builder.setLargeIcon(it) }
++
++        builder.addAction(
++            NotificationCompat.Action(
++                android.R.drawable.ic_media_previous, "Previous",
++                buildActionPendingIntent(ACTION_PREVIOUS),
++            )
++        )
++        if (isPlaying) {
++            builder.addAction(
++                NotificationCompat.Action(
++                    android.R.drawable.ic_media_pause, "Pause",
++                    buildActionPendingIntent(ACTION_PAUSE),
++                )
++            )
++        } else {
++            builder.addAction(
++                NotificationCompat.Action(
++                    android.R.drawable.ic_media_play, "Play",
++                    buildActionPendingIntent(ACTION_PLAY),
++                )
++            )
++        }
++        builder.addAction(
++            NotificationCompat.Action(
++                android.R.drawable.ic_media_next, "Next",
++                buildActionPendingIntent(ACTION_NEXT),
++            )
++        )
++
++        if (sessionToken != null) {
++            builder.setStyle(
++                androidx.media.app.NotificationCompat.MediaStyle()
++                    .setMediaSession(sessionToken)
++                    .setShowActionsInCompactView(0, 1, 2)
++                    .setShowCancelButton(true)
++                    .setCancelButtonIntent(buildActionPendingIntent(ACTION_STOP))
++            )
++        }
++
++        return builder.build()
++    }
++
++    private fun buildActionPendingIntent(action: String): PendingIntent {
++        val intent = Intent(this, PiperPlaybackService::class.java).setAction(action)
++        return PendingIntent.getService(
++            this,
++            action.hashCode(),
++            intent,
++            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
++        )
++    }
++
++    private fun handleMediaButton(action: String) {
++        // Translate the native action into a JS event so PlayerContext can
++        // call the same play()/pause()/next()/prev() that the on-screen
++        // buttons would call.
++        val rc = reactContext ?: return
++        val params = Arguments.createMap()
++        params.putString("action", action)
++        try {
++            rc.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
++              .emit("piperMediaAction", params)
++        } catch (e: Throwable) {
++            Log.w(TAG, "emit failed: ${e.message}")
++        }
++    }
++
++    private fun ensureChannel() {
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
++        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
++        if (nm.getNotificationChannel(CHANNEL_ID) != null) return
++        val ch = NotificationChannel(
++            CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW,
++        ).apply {
++            description = "Controls for the audiobook reader"
++            setShowBadge(false)
++            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
++        }
++        nm.createNotificationChannel(ch)
++    }
++
++    private fun acquireWakeLock() {
++        try {
++            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
++            val wl = pm.newWakeLock(
++                PowerManager.PARTIAL_WAKE_LOCK,
++                "BeppeAudiobooks:PiperPlayback",
++            )
++            wl.setReferenceCounted(false)
++            wl.acquire(60 * 60 * 1000L) // up to 1 hour, then auto-release
++            wakeLock = wl
++        } catch (e: Throwable) {
++            Log.w(TAG, "wakeLock acquire failed: ${e.message}")
++        }
++    }
++
++    private fun releaseWakeLock() {
++        try {
++            wakeLock?.release()
++        } catch (_: Throwable) { }
++        wakeLock = null
++    }
++
++    private fun requestAudioFocus() {
++        try {
++            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
++            audioFocusListener = AudioManager.OnAudioFocusChangeListener { focus ->
++                // Re-emit to JS so the player can react (pause on call, etc.)
++                val params = Arguments.createMap()
++                params.putInt("focus", focus)
++                reactContext?.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
++                    ?.emit("piperAudioFocus", params)
++            }
++            @Suppress("DEPRECATION")
++            am.requestAudioFocus(
++                audioFocusListener,
++                AudioManager.STREAM_MUSIC,
++                AudioManager.AUDIOFOCUS_GAIN,
++            )
++        } catch (e: Throwable) {
++            Log.w(TAG, "requestAudioFocus failed: ${e.message}")
++        }
++    }
++
++    private fun abandonAudioFocus() {
++        try {
++            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
++            @Suppress("DEPRECATION")
++            audioFocusListener?.let { am.abandonAudioFocus(it) }
++        } catch (_: Throwable) { }
++        audioFocusListener = null
++    }
++
++    override fun onTaskRemoved(rootIntent: Intent?) {
++        // When the user swipes the app away from the recent-apps screen,
++        // also kill the service. Better UX than leaving an orphan
++        // notification.
++        stopSelf()
++        super.onTaskRemoved(rootIntent)
++    }
++
++    override fun onDestroy() {
++        Log.d(TAG, "onDestroy")
++        try {
++            mediaSession?.isActive = false
++            mediaSession?.release()
++        } catch (_: Throwable) { }
++        mediaSession = null
++
++        releaseWakeLock()
++        abandonAudioFocus()
++
++        try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) { }
++
++        if (instance === this) instance = null
++        super.onDestroy()
++    }
++}
 diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
-index f76e886..70ea0ea 100644
+index f76e886..a3a4ed3 100644
 --- a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
 +++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
 @@ -8,9 +8,25 @@ import kotlin.concurrent.thread
@@ -573,13 +1033,17 @@ index f76e886..70ea0ea 100644
  class ModelLoader(private val context: Context) {
  
      /**
-@@ -86,68 +102,309 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -86,68 +102,313 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
      @Volatile private var stopping = false
      private var pendingPromise: Promise? = null
  
 +    init {
 +        AudioPlayerTrace.ctx = reactContext.applicationContext
-+        nativeTrace(reactContext, "module.init", "TTSManagerModule constructed, AudioPlayerTrace wired")
++        // PATCH (beppe-audiobooks v6): wire the React context to the
++        // PiperPlaybackService so the service can post `piperMediaAction`
++        // events back to JS when the user taps the notification controls.
++        PiperPlaybackService.reactContext = reactContext
++        nativeTrace(reactContext, "module.init", "TTSManagerModule constructed, AudioPlayerTrace + PlaybackService wired")
 +    }
 +
      override fun getName(): String {
@@ -593,7 +1057,19 @@ index f76e886..70ea0ea 100644
 +    // optimization). Without the promise, RN bridge runs this on the
 +    // native modules thread and JS returns immediately — leading to JS
 +    // calling speak() while the engine is still loading.
-+    @ReactMethod
+     @ReactMethod
+-    fun initializeTTS(sampleRate: Double, channels: Int, modelId: String) {
+-        // Setup Audio Player
+-        realTimeAudioPlayer = AudioPlayer(sampleRate.toInt(), channels, object : AudioPlayerDelegate {
+-            override fun didUpdateVolume(volume: Float) {
+-                sendVolumeUpdate(volume)
+-
+-                if (volume == -1f) {
+-                    if (stopping) return  // ignore completion emitted by stopPlayer()
+-
+-                    val p = pendingPromise
+-                    pendingPromise = null
+-                    p?.resolve("Playback finished")
 +    fun initializeTTS(sampleRate: Double, channels: Int, modelId: String, promise: Promise) {
 +        // Run on a background thread to avoid blocking the RN bridge thread
 +        // (long model loads can ANR the bridge if blocked >5s).
@@ -610,19 +1086,7 @@ index f76e886..70ea0ea 100644
 +    }
 +
 +    // Legacy entrypoint kept for backward compatibility (no promise).
-     @ReactMethod
--    fun initializeTTS(sampleRate: Double, channels: Int, modelId: String) {
--        // Setup Audio Player
--        realTimeAudioPlayer = AudioPlayer(sampleRate.toInt(), channels, object : AudioPlayerDelegate {
--            override fun didUpdateVolume(volume: Float) {
--                sendVolumeUpdate(volume)
--
--                if (volume == -1f) {
--                    if (stopping) return  // ignore completion emitted by stopPlayer()
--
--                    val p = pendingPromise
--                    pendingPromise = null
--                    p?.resolve("Playback finished")
++    @ReactMethod
 +    fun initializeTTSLegacy(sampleRate: Double, channels: Int, modelId: String) {
 +        try {
 +            doInitializeTTS(sampleRate, channels, modelId)
@@ -666,7 +1130,7 @@ index f76e886..70ea0ea 100644
 +                        pendingPromise = null
 +                        p?.resolve("Playback finished")
 +                    }
-                 }
++                }
 +            })
 +            nativeTrace(reactContext, "init.1.audioplayer.new.ok", "instance=${realTimeAudioPlayer != null}")
 +        } catch (e: Throwable) {
@@ -714,42 +1178,7 @@ index f76e886..70ea0ea 100644
 +            nativeTrace(reactContext, "init.3a.model.check.ok", "size=${size}B head=$hex")
 +            if (head[0].toInt() != 0x08) {
 +                nativeTrace(reactContext, "init.3a.model.check.WARN", "first byte != 0x08")
-             }
--        })
--
--
--        // Determine model paths based on modelId
--        
--        // val modelDirAssetPath = "models"
--        // val modelDirInternal = reactContext.filesDir
--        // modelLoader.copyAssetDirectory(modelDirAssetPath, modelDirInternal)
--        // val modelPath = File(modelDirInternal, if (modelId.lowercase() == "male") "en_US-ryan-medium.onnx" else "en_US-hfc_female-medium.onnx").absolutePath
--        // val tokensPath = File(modelDirInternal, "tokens.txt").absolutePath
--        // val dataDirPath = File(modelDirInternal, "espeak-ng-data").absolutePath // Directory copy handled above
--
--        val jsonObject = JSONObject(modelId)
--        val modelPath = jsonObject.getString("modelPath")
--        val tokensPath = jsonObject.getString("tokensPath")
--        val dataDirPath = jsonObject.getString("dataDirPath")
--
--        // Build OfflineTtsConfig using the helper function
--        val config = OfflineTtsConfig(
--            model=OfflineTtsModelConfig(
--              vits=OfflineTtsVitsModelConfig(
--                model=modelPath,
--                tokens=tokensPath,
--                dataDir=dataDirPath,
--              ),
--              numThreads=1,
--              debug=true,
--            )
--          )
--
--        // Initialize sherpa-onnx offline TTS
--        tts = OfflineTts(config=config)
--
--        // Start the audio player
--        realTimeAudioPlayer?.start()
++            }
 +        } catch (e: Throwable) {
 +            nativeTrace(reactContext, "init.3a.model.check.THREW", "${e.javaClass.simpleName}: ${e.message}")
 +            throw e
@@ -890,12 +1319,47 @@ index f76e886..70ea0ea 100644
 +                    try { candidate.release() } catch (re: Throwable) {
 +                        nativeTrace(reactContext, "init.5h.release.err", "${re.javaClass.simpleName}: ${re.message}")
 +                    }
-+                }
+                 }
 +            } catch (e: Throwable) {
 +                lastErr = "${e.javaClass.simpleName}: ${e.message}"
 +                val st = e.stackTrace.take(3).joinToString(" | ") { "${it.className}.${it.methodName}:${it.lineNumber}" }
 +                nativeTrace(reactContext, "init.5.provider.THREW", "[$provider] $lastErr | stack=$st")
-+            }
+             }
+-        })
+-
+-
+-        // Determine model paths based on modelId
+-        
+-        // val modelDirAssetPath = "models"
+-        // val modelDirInternal = reactContext.filesDir
+-        // modelLoader.copyAssetDirectory(modelDirAssetPath, modelDirInternal)
+-        // val modelPath = File(modelDirInternal, if (modelId.lowercase() == "male") "en_US-ryan-medium.onnx" else "en_US-hfc_female-medium.onnx").absolutePath
+-        // val tokensPath = File(modelDirInternal, "tokens.txt").absolutePath
+-        // val dataDirPath = File(modelDirInternal, "espeak-ng-data").absolutePath // Directory copy handled above
+-
+-        val jsonObject = JSONObject(modelId)
+-        val modelPath = jsonObject.getString("modelPath")
+-        val tokensPath = jsonObject.getString("tokensPath")
+-        val dataDirPath = jsonObject.getString("dataDirPath")
+-
+-        // Build OfflineTtsConfig using the helper function
+-        val config = OfflineTtsConfig(
+-            model=OfflineTtsModelConfig(
+-              vits=OfflineTtsVitsModelConfig(
+-                model=modelPath,
+-                tokens=tokensPath,
+-                dataDir=dataDirPath,
+-              ),
+-              numThreads=1,
+-              debug=true,
+-            )
+-          )
+-
+-        // Initialize sherpa-onnx offline TTS
+-        tts = OfflineTts(config=config)
+-
+-        // Start the audio player
+-        realTimeAudioPlayer?.start()
 +        }
 +
 +        if (createdTts == null) {
@@ -930,7 +1394,7 @@ index f76e886..70ea0ea 100644
              promise.reject("EMPTY_TEXT", "Input text is empty")
              return
          }
-@@ -155,6 +412,7 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -155,6 +416,7 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
          val player = realTimeAudioPlayer
          val engine = tts
          if (player == null || engine == null) {
@@ -938,7 +1402,7 @@ index f76e886..70ea0ea 100644
              promise.reject("NOT_INITIALIZED", "TTS is not initialized")
              return
          }
-@@ -167,18 +425,29 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -167,18 +429,29 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
          val playbackId = playbackSeq
          activePlaybackId = playbackId
  
@@ -973,7 +1437,7 @@ index f76e886..70ea0ea 100644
              pendingPromise = null
              promise.reject("GENERATION_ERROR", "Error during audio generation: ${e.message}")
          }
-@@ -203,6 +472,44 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -203,6 +476,119 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
          stopping = false
      }
  
@@ -1015,10 +1479,85 @@ index f76e886..70ea0ea 100644
 +        promise.resolve(tts != null && realTimeAudioPlayer != null)
 +    }
 +
++    // ─── PATCH (beppe-audiobooks v6): MediaSession / Foreground Service ────
++    //
++    // These three @ReactMethods let the JS PlayerContext drive the
++    // PiperPlaybackService. The service runs an ongoing MediaStyle
++    // notification (Play/Pause/Skip on the lock-screen), keeps the CPU
++    // alive via a PARTIAL_WAKE_LOCK, and requests AUDIOFOCUS_GAIN so
++    // calls / Spotify can duck or pause the audiobook.
++
++    @ReactMethod
++    fun startPlaybackSession(options: ReadableMap, promise: Promise) {
++        try {
++            val title = if (options.hasKey("title")) options.getString("title") else "Audiobook"
++            val author = if (options.hasKey("author")) options.getString("author") else ""
++            val cover = if (options.hasKey("coverBase64")) options.getString("coverBase64") else null
++            val isPlaying = if (options.hasKey("isPlaying")) options.getBoolean("isPlaying") else true
++
++            val ctx = reactContext.applicationContext
++            val intent = android.content.Intent(ctx, PiperPlaybackService::class.java).apply {
++                putExtra(PiperPlaybackService.EXTRA_TITLE, title ?: "Audiobook")
++                putExtra(PiperPlaybackService.EXTRA_AUTHOR, author ?: "")
++                putExtra(PiperPlaybackService.EXTRA_IS_PLAYING, isPlaying)
++                if (cover != null) putExtra(PiperPlaybackService.EXTRA_COVER_BASE64, cover)
++            }
++            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
++                ctx.startForegroundService(intent)
++            } else {
++                ctx.startService(intent)
++            }
++            nativeTrace(reactContext, "playback.session.start",
++                "title='$title' author='$author' playing=$isPlaying")
++            promise.resolve("OK")
++        } catch (e: Throwable) {
++            nativeTrace(reactContext, "playback.session.start.THREW",
++                "${e.javaClass.simpleName}: ${e.message}")
++            promise.reject("START_SESSION_FAILED", e.message ?: e.javaClass.simpleName, e)
++        }
++    }
++
++    @ReactMethod
++    fun updatePlaybackSession(options: ReadableMap, promise: Promise) {
++        try {
++            val svc = PiperPlaybackService.instance
++            if (svc != null) {
++                val title = if (options.hasKey("title")) options.getString("title") ?: "Audiobook" else "Audiobook"
++                val author = if (options.hasKey("author")) options.getString("author") else null
++                val cover = if (options.hasKey("coverBase64")) options.getString("coverBase64") else null
++                val isPlaying = if (options.hasKey("isPlaying")) options.getBoolean("isPlaying") else true
++                svc.updateState(title, author, isPlaying, cover)
++            }
++            promise.resolve("OK")
++        } catch (e: Throwable) {
++            promise.reject("UPDATE_SESSION_FAILED", e.message ?: e.javaClass.simpleName, e)
++        }
++    }
++
++    @ReactMethod
++    fun stopPlaybackSession(promise: Promise) {
++        try {
++            val ctx = reactContext.applicationContext
++            val intent = android.content.Intent(ctx, PiperPlaybackService::class.java)
++            ctx.stopService(intent)
++            nativeTrace(reactContext, "playback.session.stop", "service stopped")
++            promise.resolve("OK")
++        } catch (e: Throwable) {
++            promise.reject("STOP_SESSION_FAILED", e.message ?: e.javaClass.simpleName, e)
++        }
++    }
++
++    // Required for NativeEventEmitter listener registration on JS side.
++    @ReactMethod
++    fun addListener(eventName: String) { /* no-op, RN handles */ }
++
++    @ReactMethod
++    fun removeListeners(count: Int) { /* no-op, RN handles */ }
++
      @ReactMethod
      fun generateAndSave(text: String, path: String?, fileType: String?, promise: Promise) {
          val trimmed = text.trim()
-@@ -290,17 +597,26 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -290,17 +676,26 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
      }
  
      private fun generateAudio(text: String, sid: Int, speed: Float) {

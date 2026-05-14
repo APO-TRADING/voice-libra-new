@@ -12,7 +12,9 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.beppe.audiobooks",
       "infoPlist": {
-        "UIBackgroundModes": ["audio"],
+        "UIBackgroundModes": [
+          "audio"
+        ],
         "NSPhotoLibraryUsageDescription": "Scegli una copertina per i libri",
         "NSDocumentsFolderUsageDescription": "Carica eBook in libreria"
       }
@@ -27,7 +29,9 @@
       "permissions": [
         "READ_EXTERNAL_STORAGE",
         "WAKE_LOCK",
-        "FOREGROUND_SERVICE"
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "POST_NOTIFICATIONS"
       ]
     },
     "web": {
@@ -49,9 +53,13 @@
             "compileSdkVersion": 35,
             "targetSdkVersion": 35,
             "minSdkVersion": 24,
-            "extraMavenRepos": ["https://jitpack.io"]
+            "extraMavenRepos": [
+              "https://jitpack.io"
+            ]
           },
-          "ios": { "deploymentTarget": "15.1" }
+          "ios": {
+            "deploymentTarget": "15.1"
+          }
         }
       ],
       [
@@ -62,7 +70,8 @@
           "resizeMode": "contain",
           "backgroundColor": "#0A0A0C"
         }
-      ]
+      ],
+      "expo-localization"
     ],
     "experiments": {
       "typedRoutes": true

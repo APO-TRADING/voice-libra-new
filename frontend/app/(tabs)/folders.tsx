@@ -16,9 +16,11 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, BookSummary, Folder } from '../../src/api/client';
 import { useTheme } from '../../src/contexts/ThemeContext';
+import { useT } from '../../src/i18n';
 
 export default function FoldersScreen() {
   const { colors } = useTheme();
+  const t = useT();
   const insets = useSafeAreaInsets();
   const [folders, setFolders] = useState<Folder[]>([]);
   const [counts, setCounts] = useState<Record<string, number>>({});
@@ -46,39 +48,46 @@ export default function FoldersScreen() {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
+  const countLabel = (n: number) =>
+    n === 0
+      ? t('library.bookCount.zero')
+      : n === 1
+      ? t('folders.folderCount.one', { n })
+      : t('folders.folderCount.other', { n });
+
   const submit = async () => {
-    const t = name.trim();
-    if (!t) return;
+    const nm = name.trim();
+    if (!nm) return;
     try {
-      if (editing) await api.updateFolder(editing.id, t);
-      else await api.createFolder(t);
+      if (editing) await api.updateFolder(editing.id, nm);
+      else await api.createFolder(nm);
       setName('');
       setEditing(null);
       setCreating(false);
       load();
     } catch (e: any) {
-      Alert.alert('Errore', String(e?.message || e));
+      Alert.alert(t('common.error'), String(e?.message || e));
     }
   };
 
   const remove = (f: Folder) => {
-    Alert.alert('Elimina cartella', `Eliminare "${f.name}"? I libri non verranno cancellati.`, [
-      { text: 'Annulla', style: 'cancel' },
-      { text: 'Elimina', style: 'destructive', onPress: async () => { await api.deleteFolder(f.id); load(); } },
+    Alert.alert(t('folders.delete.confirmTitle'), t('folders.delete.confirmBody', { name: f.name }), [
+      { text: t('common.cancel'), style: 'cancel' },
+      { text: t('common.delete'), style: 'destructive', onPress: async () => { await api.deleteFolder(f.id); load(); } },
     ]);
   };
 
   return (
     <View style={[styles.c, { backgroundColor: colors.background, paddingTop: insets.top + 8 }]} testID="folders-screen">
       <View style={styles.header}>
-        <Text style={[styles.title, { color: colors.textPrimary }]}>Cartelle</Text>
+        <Text style={[styles.title, { color: colors.textPrimary }]}>{t('folders.title')}</Text>
         <TouchableOpacity
           testID="create-folder-btn"
           onPress={() => { setEditing(null); setName(''); setCreating(true); }}
           style={[styles.addBtn, { backgroundColor: colors.primaryActive }]}
         >
           <FolderPlus color="#0A0A0C" size={18} />
-          <Text style={[styles.addLabel, { color: '#0A0A0C' }]}>Nuova</Text>
+          <Text style={[styles.addLabel, { color: '#0A0A0C' }]}>{t('folders.new')}</Text>
         </TouchableOpacity>
       </View>
 
@@ -97,8 +106,8 @@ export default function FoldersScreen() {
               <FolderIcon color={colors.textSecondary} size={20} />
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={[styles.rowTitle, { color: colors.textPrimary }]}>Senza cartella</Text>
-              <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>{unfiled} libri</Text>
+              <Text style={[styles.rowTitle, { color: colors.textPrimary }]}>{t('folders.unfiled')}</Text>
+              <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>{countLabel(unfiled)}</Text>
             </View>
             <ChevronRight color={colors.textSecondary} size={18} />
           </TouchableOpacity>
@@ -106,7 +115,7 @@ export default function FoldersScreen() {
         ListEmptyComponent={
           <View style={{ alignItems: 'center', paddingVertical: 64 }}>
             <Text style={[styles.empty, { color: colors.textSecondary }]}>
-              Nessuna cartella. Toccare "Nuova" per crearne una.
+              {t('folders.empty')}
             </Text>
           </View>
         }
@@ -122,7 +131,7 @@ export default function FoldersScreen() {
             </View>
             <View style={{ flex: 1 }}>
               <Text style={[styles.rowTitle, { color: colors.textPrimary }]}>{item.name}</Text>
-              <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>{counts[item.id] || 0} libri</Text>
+              <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>{countLabel(counts[item.id] || 0)}</Text>
             </View>
             <TouchableOpacity
               testID={`folder-edit-${item.id}`}
@@ -158,13 +167,13 @@ export default function FoldersScreen() {
         >
           <View style={[styles.modal, { backgroundColor: colors.surface, borderColor: colors.border }]}>
             <Text style={[styles.modalTitle, { color: colors.textPrimary }]}>
-              {editing ? 'Rinomina cartella' : 'Nuova cartella'}
+              {editing ? t('folders.rename') : t('folders.create')}
             </Text>
             <TextInput
               testID="folder-name-input"
               value={name}
               onChangeText={setName}
-              placeholder="Nome cartella"
+              placeholder={t('folders.name.placeholder')}
               placeholderTextColor={colors.textSecondary}
               style={[styles.input, { color: colors.textPrimary, borderColor: colors.border, backgroundColor: colors.background }]}
               autoFocus
@@ -174,7 +183,7 @@ export default function FoldersScreen() {
                 onPress={() => { setCreating(false); setEditing(null); setName(''); }}
                 style={[styles.modalBtn, { borderColor: colors.border, borderWidth: 1 }]}
               >
-                <Text style={[styles.modalBtnLabel, { color: colors.textPrimary }]}>Annulla</Text>
+                <Text style={[styles.modalBtnLabel, { color: colors.textPrimary }]}>{t('common.cancel')}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 testID="folder-submit-btn"
@@ -182,7 +191,7 @@ export default function FoldersScreen() {
                 style={[styles.modalBtn, { backgroundColor: colors.primaryActive }]}
               >
                 <Text style={[styles.modalBtnLabel, { color: '#0A0A0C', fontWeight: '700' }]}>
-                  {editing ? 'Salva' : 'Crea'}
+                  {editing ? t('common.save') : t('folders.create.cta')}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -196,7 +205,8 @@ export default function FoldersScreen() {
 const styles = StyleSheet.create({
   c: { flex: 1 },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 24, paddingBottom: 8 },
-  title: { fontSize: 36, fontWeight: '700', letterSpacing: -0.5 },
+  // PATCH (beppe-audiobooks v6): title enlarged to match the Library header.
+  title: { fontSize: 42, fontWeight: '800', letterSpacing: -0.8 },
   addBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 16, height: 40, borderRadius: 999 },
   addLabel: { fontSize: 13, fontWeight: '700' },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, borderRadius: 16, borderWidth: 1 },

@@ -822,4 +822,58 @@ export async function stopSpeak(): Promise<void> {
   initEngine();
 }
 
+// ─── PATCH (beppe-audiobooks v6): foreground service / MediaSession ────
+//
+// Lightweight wrappers around the three native methods exposed by the
+// updated TTSManagerModule. They are no-ops if the running native module
+// does not implement them (so the JS bundle stays compatible with older
+// patches).
+
+export type PlaybackSession = {
+  title: string;
+  author?: string | null;
+  coverBase64?: string | null; // can be raw base64 or "data:image/...;base64,...."
+  isPlaying: boolean;
+};
+
+export async function startPlaybackSession(s: PlaybackSession): Promise<void> {
+  const native: any = (NativeModules as any).TTSManager;
+  if (!native || typeof native.startPlaybackSession !== 'function') return;
+  try {
+    await native.startPlaybackSession({
+      title: s.title || 'Audiobook',
+      author: s.author || '',
+      coverBase64: s.coverBase64 || null,
+      isPlaying: !!s.isPlaying,
+    });
+  } catch (e: any) {
+    await trace('playback.session.start.JS', `err: ${e?.message || e}`);
+  }
+}
+
+export async function updatePlaybackSession(s: Partial<PlaybackSession>): Promise<void> {
+  const native: any = (NativeModules as any).TTSManager;
+  if (!native || typeof native.updatePlaybackSession !== 'function') return;
+  try {
+    await native.updatePlaybackSession({
+      title: s.title ?? 'Audiobook',
+      author: s.author ?? '',
+      coverBase64: s.coverBase64 ?? null,
+      isPlaying: typeof s.isPlaying === 'boolean' ? s.isPlaying : true,
+    });
+  } catch (e: any) {
+    await trace('playback.session.update.JS', `err: ${e?.message || e}`);
+  }
+}
+
+export async function stopPlaybackSession(): Promise<void> {
+  const native: any = (NativeModules as any).TTSManager;
+  if (!native || typeof native.stopPlaybackSession !== 'function') return;
+  try {
+    await native.stopPlaybackSession();
+  } catch (e: any) {
+    await trace('playback.session.stop.JS', `err: ${e?.message || e}`);
+  }
+}
+
 export const piperPlatformOk = Platform.OS === 'android' || Platform.OS === 'ios';

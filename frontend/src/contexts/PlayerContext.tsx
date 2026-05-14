@@ -9,12 +9,24 @@
 // Singleton: any new play() call hard-stops the previous one before starting.
 import * as Speech from 'expo-speech';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { DeviceEventEmitter, NativeEventEmitter, NativeModules, Platform } from 'react-native';
 import { api, BookFull } from '../api/client';
-import { initEngine, isPiperReady, speakSentence as piperSpeak, stopSpeak as piperStop, getPiperDiagnostics } from '../audio/piperEngine';
+import {
+  initEngine,
+  isPiperReady,
+  speakSentence as piperSpeak,
+  stopSpeak as piperStop,
+  getPiperDiagnostics,
+  startPlaybackSession,
+  updatePlaybackSession,
+  stopPlaybackSession,
+} from '../audio/piperEngine';
 
 type State = {
   bookId: string | null;
   title: string;
+  author: string | null;
+  coverUrl: string | null;
   sentences: string[];
   index: number;
   isPlaying: boolean;
@@ -40,6 +52,8 @@ const PlayerContext = createContext<Ctx | undefined>(undefined);
 export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [bookId, setBookId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
+  const [author, setAuthor] = useState<string | null>(null);
+  const [coverUrl, setCoverUrl] = useState<string | null>(null);
   const [sentences, setSentences] = useState<string[]>([]);
   const [index, setIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -53,6 +67,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const lengthScaleRef = useRef(lengthScale);
   const playingRef = useRef(false);
   const bookIdRef = useRef<string | null>(null);
+  const titleRef = useRef<string>('');
+  const authorRef = useRef<string | null>(null);
+  const coverUrlRef = useRef<string | null>(null);
+  const sessionStartedRef = useRef<boolean>(false);
   const generationRef = useRef(0); // monotonic ID to drop stale callbacks
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // PATCH (beppe-audiobooks v5): count consecutive Piper failures. Falling
@@ -69,6 +87,52 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { sentencesRef.current = sentences; }, [sentences]);
   useEffect(() => { lengthScaleRef.current = lengthScale; }, [lengthScale]);
   useEffect(() => { bookIdRef.current = bookId; }, [bookId]);
+  useEffect(() => { titleRef.current = title; }, [title]);
+  useEffect(() => { authorRef.current = author; }, [author]);
+  useEffect(() => { coverUrlRef.current = coverUrl; }, [coverUrl]);
+
+  // PATCH (beppe-audiobooks v6): listen for media-button events from the
+  // foreground service notification (Android) — translate them into the
+  // same play()/pause()/jump() actions as the on-screen controls.
+  // Also reacts to audio-focus changes (incoming call, etc.).
+  // Use a ref to break the (otherwise circular) dependency cycle with
+  // play() / pause() / jump().
+  const ctrlRef = useRef<{ play: () => void; pause: () => void; jump: (d: number) => void } | null>(null);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    let subAction: any;
+    let subFocus: any;
+    try {
+      const TTSManager = (NativeModules as any).TTSManager;
+      const emitter = TTSManager ? new NativeEventEmitter(TTSManager) : null;
+      const target: any = emitter || DeviceEventEmitter;
+      subAction = target.addListener('piperMediaAction', (e: { action: string }) => {
+        if (!e?.action) return;
+        const c = ctrlRef.current;
+        if (!c) return;
+        if (e.action.endsWith('.PLAY')) c.play();
+        else if (e.action.endsWith('.PAUSE')) c.pause();
+        else if (e.action.endsWith('.NEXT')) c.jump(1);
+        else if (e.action.endsWith('.PREVIOUS')) c.jump(-1);
+        else if (e.action.endsWith('.STOP')) c.pause();
+      });
+      subFocus = target.addListener('piperAudioFocus', (e: { focus: number }) => {
+        // -1=AUDIOFOCUS_LOSS, -2=TRANSIENT, -3=CAN_DUCK, 1=GAIN
+        const c = ctrlRef.current;
+        if (!c) return;
+        if (e?.focus === -1 || e?.focus === -2) c.pause();
+        // For AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK (-3) we keep playing —
+        // the OS will lower our volume itself.
+      });
+    } catch (e) {
+      console.warn('[Player] native media listeners failed:', e);
+    }
+    return () => {
+      try { subAction?.remove(); } catch { /* ignore */ }
+      try { subFocus?.remove(); } catch { /* ignore */ }
+    };
+  }, []);
 
   // NOTE: do NOT call initEngine() here. We initialize Piper lazily on the
   // first play() to keep app startup robust: if sherpa init were to crash
@@ -185,6 +249,28 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
           setPiperError(`init-exception: ${e?.message || String(e)}`);
         }
       }
+      // PATCH (beppe-audiobooks v6): start (or update) the foreground
+      // service + MediaSession so the audiobook keeps playing with the
+      // screen off and the user gets lock-screen / notification controls.
+      const cover = coverUrlRef.current && coverUrlRef.current.startsWith('data:')
+        ? coverUrlRef.current
+        : null; // only embed when we have the actual bitmap as base64
+      if (!sessionStartedRef.current) {
+        sessionStartedRef.current = true;
+        startPlaybackSession({
+          title: titleRef.current || 'Audiobook',
+          author: authorRef.current,
+          coverBase64: cover,
+          isPlaying: true,
+        });
+      } else {
+        updatePlaybackSession({
+          title: titleRef.current || 'Audiobook',
+          author: authorRef.current,
+          coverBase64: cover,
+          isPlaying: true,
+        });
+      }
       playLoop(indexRef.current);
     });
   }, [engine, playLoop, stopAll]);
@@ -193,6 +279,15 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     playingRef.current = false;
     setIsPlaying(false);
     stopAll();
+    // Update the notification to show the "play" button (the engine and
+    // wake-lock stay alive so the user can resume instantly).
+    if (sessionStartedRef.current) {
+      updatePlaybackSession({
+        title: titleRef.current || 'Audiobook',
+        author: authorRef.current,
+        isPlaying: false,
+      });
+    }
   }, [stopAll]);
 
   const toggle = useCallback(() => {
@@ -219,8 +314,15 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     pause();
     setBookId(null);
     setTitle('');
+    setAuthor(null);
+    setCoverUrl(null);
     setSentences([]);
     setIndex(0);
+    // Tear down the foreground service + notification.
+    if (sessionStartedRef.current) {
+      sessionStartedRef.current = false;
+      stopPlaybackSession();
+    }
   }, [pause]);
 
   const load = useCallback(async (id: string) => {
@@ -228,12 +330,18 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const book: BookFull = await api.getBook(id);
     setBookId(book.id);
     setTitle(book.title);
+    setAuthor(book.author || null);
+    setCoverUrl(book.cover_url || null);
     setSentences(book.sentences || []);
     const startIdx = Math.max(0, Math.min(book.current_sentence_index || 0, (book.sentences?.length || 1) - 1));
     setIndex(startIdx);
     indexRef.current = startIdx;
     setLengthScale(book.length_scale || 1.0);
     lengthScaleRef.current = book.length_scale || 1.0;
+    // Sync refs so the next play() picks up the freshly-loaded metadata.
+    titleRef.current = book.title;
+    authorRef.current = book.author || null;
+    coverUrlRef.current = book.cover_url || null;
   }, [pause]);
 
   const updateLengthScale = useCallback((v: number) => {
@@ -249,10 +357,16 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => () => { stopAll(); }, [stopAll]);
 
+  // Keep ctrlRef in sync so the native listener can dispatch back to
+  // the current handlers.
+  useEffect(() => {
+    ctrlRef.current = { play, pause, jump };
+  }, [play, pause, jump]);
+
   const value = useMemo<Ctx>(() => ({
-    bookId, title, sentences, index, isPlaying, lengthScale, engine, piperError, piperStep,
+    bookId, title, author, coverUrl, sentences, index, isPlaying, lengthScale, engine, piperError, piperStep,
     load, play, pause, toggle, jump, goTo, setLengthScale: updateLengthScale, stop,
-  }), [bookId, title, sentences, index, isPlaying, lengthScale, engine, piperError, piperStep, load, play, pause, toggle, jump, goTo, updateLengthScale, stop]);
+  }), [bookId, title, author, coverUrl, sentences, index, isPlaying, lengthScale, engine, piperError, piperStep, load, play, pause, toggle, jump, goTo, updateLengthScale, stop]);
 
   return <PlayerContext.Provider value={value}>{children}</PlayerContext.Provider>;
 }

@@ -12,9 +12,16 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, BookSummary, Folder } from '../../src/api/client';
 import BookList from '../../src/components/BookList';
 import { useTheme } from '../../src/contexts/ThemeContext';
+import { useT } from '../../src/i18n';
+
+function bookCountLabel(t: ReturnType<typeof useT>, n: number) {
+  if (n === 0) return t('library.bookCount.zero');
+  return n === 1 ? t('library.bookCount.one', { n }) : t('library.bookCount.other', { n });
+}
 
 export default function Library() {
   const { colors } = useTheme();
+  const t = useT();
   const insets = useSafeAreaInsets();
   const [books, setBooks] = useState<BookSummary[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -53,21 +60,19 @@ export default function Library() {
       testID="library-screen"
     >
       <View style={styles.header}>
-        <View>
-          <Text style={[styles.title, { color: colors.textPrimary }]}>Libreria</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={[styles.title, { color: colors.textPrimary }]}>{t('library.title')}</Text>
           <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
-            {books.length} {books.length === 1 ? 'libro' : 'libri'}
+            {bookCountLabel(t, books.length)}
           </Text>
         </View>
-        <View style={styles.headerActions}>
-          <TouchableOpacity
-            testID="library-refresh"
-            onPress={onRefresh}
-            style={[styles.iconBtn, { borderColor: colors.border }]}
-          >
-            <RefreshCcw color={colors.textSecondary} size={18} />
-          </TouchableOpacity>
-        </View>
+        <TouchableOpacity
+          testID="library-refresh"
+          onPress={onRefresh}
+          style={[styles.iconBtn, { borderColor: colors.border }]}
+        >
+          <RefreshCcw color={colors.textSecondary} size={18} />
+        </TouchableOpacity>
       </View>
 
       {empty ? (
@@ -78,16 +83,16 @@ export default function Library() {
             }}
             style={styles.emptyImg}
           />
-          <Text style={[styles.emptyTitle, { color: colors.textPrimary }]}>La tua libreria è vuota</Text>
+          <Text style={[styles.emptyTitle, { color: colors.textPrimary }]}>{t('library.empty.title')}</Text>
           <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
-            Carica un eBook (PDF, EPUB, DOCX o TXT) per iniziare ad ascoltare.
+            {t('library.empty.body')}
           </Text>
           <TouchableOpacity
             testID="empty-upload-cta"
             style={[styles.cta, { backgroundColor: colors.primaryActive }]}
             onPress={() => router.push('/upload')}
           >
-            <Text style={[styles.ctaText, { color: '#0A0A0C' }]}>Carica un libro</Text>
+            <Text style={[styles.ctaText, { color: '#0A0A0C' }]}>{t('library.empty.cta')}</Text>
           </TouchableOpacity>
         </View>
       ) : (
@@ -98,7 +103,6 @@ export default function Library() {
           refreshing={refreshing}
           onRefresh={onRefresh}
           reload={load}
-          emptyMessage="Nessun libro nella libreria."
         />
       )}
     </View>
@@ -113,10 +117,12 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     paddingHorizontal: 24,
     paddingBottom: 12,
+    gap: 12,
   },
-  title: { fontSize: 36, fontWeight: '700', letterSpacing: -0.5 },
+  // PATCH (beppe-audiobooks v6): title enlarged from 36 → 42 since the
+  // duplicate small "Libreria" navigation header has been removed.
+  title: { fontSize: 42, fontWeight: '800', letterSpacing: -0.8 },
   subtitle: { fontSize: 13, marginTop: 4, letterSpacing: 0.3 },
-  headerActions: { flexDirection: 'row', gap: 8 },
   iconBtn: { width: 40, height: 40, borderRadius: 999, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, gap: 16 },
   emptyImg: { width: 220, height: 160, borderRadius: 24, opacity: 0.85 },
