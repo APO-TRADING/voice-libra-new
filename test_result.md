@@ -353,7 +353,33 @@ agent_communication:
       Tested via tsc --noEmit and metro bundling, no errors.
   - agent: "main"
     message: |
-      v6.1 (post-Expo-Go test) — Bug fix sweep:
+      v6.2 (post-Expo-Go PDF crash report) — Real fix:
+
+      The v6.1 stubs for URL/URLSearchParams were both INSUFFICIENT and
+      MIS-PLACED:
+        • Insufficient: pdfjs-dist 3.x uses `new URLSearchParams('a=1')` and
+          iterates the result. An empty `function() {}` stub passes the
+          `.prototype` access but throws later when pdfjs calls actual
+          parsing methods.
+        • Mis-placed: the polyfill was inside loadPdfjs(), which runs
+          AFTER the user picks a PDF. pdf.js touches URLSearchParams at
+          MODULE-LOAD; if Metro/Hermes resolves the module differently
+          (eager evaluation under JSI), the touch happens BEFORE
+          loadPdfjs's polyfill can run.
+
+      v6.2 FIX:
+        • Added the official `react-native-url-polyfill` (WHATWG-compliant
+          full implementation of URL + URLSearchParams).
+        • Imported `react-native-url-polyfill/auto` as the VERY FIRST line
+          of app/_layout.tsx, so the polyfill is installed before ANY
+          other module is evaluated by Hermes.
+        • Removed the now-redundant URL/URLSearchParams stubs from
+          extractors.ts (kept DOMMatrix/Path2D which are still required).
+        • Kept the try/catch around the require with a helpful error msg.
+
+      This restores PDF upload functionality in Expo Go (and is a no-op
+      on the EAS-built APK, where the native expo-pdf-text-extract path
+      is preferred anyway).
 
       (A) **PDF upload broken on Expo Go** → fixed.
           ROOT CAUSE: pdfjs-dist 3.11.174 references `URLSearchParams.

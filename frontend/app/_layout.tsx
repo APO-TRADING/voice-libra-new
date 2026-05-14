@@ -1,3 +1,12 @@
+// PATCH (beppe-audiobooks v6.2): URL/URLSearchParams polyfill MUST be the
+// very first thing the bundle evaluates. Hermes (Expo Go's JS engine) does
+// not always expose a complete URLSearchParams API — and pdfjs-dist 3.x
+// touches `URLSearchParams.prototype` at module-load time, which crashes
+// the require() if the global is missing. The auto-import below installs a
+// full WHATWG-compliant URL + URLSearchParams BEFORE any other module is
+// loaded.
+import 'react-native-url-polyfill/auto';
+
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';

@@ -195,38 +195,25 @@ function loadPdfjs(): any {
   if (typeof g.DOMMatrix === 'undefined') g.DOMMatrix = function () { /* stub */ };
   if (typeof g.Path2D === 'undefined') g.Path2D = function () { /* stub */ };
 
-  // PATCH (beppe-audiobooks v6.1): URLSearchParams / URL polyfills.
-  // Hermes < 0.74 (and the Hermes shipped in some Expo Go versions) doesn't
-  // ship URLSearchParams as a global. pdfjs-dist 3.11 touches
-  // URLSearchParams.prototype unguarded at module-load — see lines 2407/2477
-  // of node_modules/pdfjs-dist/legacy/build/pdf.js. Without these stubs the
-  // very `require()` of the module throws "Cannot read property 'prototype'
-  // of undefined" before any of our defensive code can catch it. pdfjs only
-  // uses URLSearchParams in its feature-detect for the polyfill registry,
-  // never in the actual PDF parsing path, so an empty no-op class is enough.
-  if (typeof g.URLSearchParams === 'undefined') {
-    g.URLSearchParams = function URLSearchParams() { /* stub */ };
-    g.URLSearchParams.prototype = {};
-  }
-  if (typeof g.URL === 'undefined') {
-    g.URL = function URL() { /* stub */ };
-    g.URL.prototype = {};
-  }
+  // PATCH (beppe-audiobooks v6.2): URL/URLSearchParams are now polyfilled
+  // globally in app/_layout.tsx via `react-native-url-polyfill/auto` (a
+  // full WHATWG-compliant implementation). The previous attempt with empty
+  // function stubs inside loadPdfjs() was both too late (pdf.js touches
+  // URLSearchParams.prototype at module-load, before this function runs)
+  // and incomplete (only stubs `prototype`, not the methods pdf.js may
+  // call afterwards).
 
   // pdfjs-dist 3.x CJS build (no import.meta — RN/Hermes friendly).
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   try {
     _pdfjsLoaded = require('pdfjs-dist/legacy/build/pdf.js');
   } catch (e: any) {
-    // Surface a clear, actionable error rather than the cryptic Hermes one.
     throw new Error(
       `pdfjs-dist failed to load on this device: ${e?.message || e}. ` +
-      `This typically indicates a missing Hermes polyfill. The native ` +
-      `PDF extractor (expo-pdf-text-extract) is the recommended path on ` +
-      `device — only Expo Go falls back to pdfjs-dist.`,
+      `Build the APK via EAS to use the native (PDFBox) extractor instead.`,
     );
   }
-  if (_pdfjsLoaded.GlobalWorkerOptions) _pdfjsLoaded.GlobalWorkerOptions.workerSrc = '';
+  if (_pdfjsLoaded?.GlobalWorkerOptions) _pdfjsLoaded.GlobalWorkerOptions.workerSrc = '';
   return _pdfjsLoaded;
 }
 
