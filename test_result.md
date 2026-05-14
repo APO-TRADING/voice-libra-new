@@ -353,7 +353,35 @@ agent_communication:
       Tested via tsc --noEmit and metro bundling, no errors.
   - agent: "main"
     message: |
-      v6 follow-up — 4 big features completed in one session:
+      v6.1 (post-Expo-Go test) — Bug fix sweep:
+
+      (A) **PDF upload broken on Expo Go** → fixed.
+          ROOT CAUSE: pdfjs-dist 3.11.174 references `URLSearchParams.
+          prototype` at module load (lines 2407 and 2477 of
+          `legacy/build/pdf.js`) WITHOUT a defensive guard. The Hermes
+          shipped with Expo Go does not expose URLSearchParams as a
+          global, so `require('pdfjs-dist/...')` throws
+          `TypeError: Cannot read property 'prototype' of undefined`
+          BEFORE any of our code can catch it.
+          FIX: src/storage/extractors.ts — `loadPdfjs()` now polyfills
+          `URLSearchParams` and `URL` (empty-class stubs sufficient
+          because pdfjs only uses them in its feature-detect path,
+          never in actual PDF parsing). The require() is also wrapped
+          in try/catch and re-throws a clear, actionable error.
+
+      (B) **Player background continuation** — the previous useEffect
+          cleanup of app/player/[id].tsx was calling `player.pause()`
+          on unmount. That meant whenever the user navigated away from
+          the Player screen (e.g. tapped back to the library), the TTS
+          stopped. With the new foreground service in place, this is
+          the OPPOSITE of what we want: the audiobook should keep
+          reading in the background, lock-screen notification still
+          showing transport controls. FIX: removed the pause() from
+          unmount; player.load() still pauses internally when a NEW
+          book is selected, and the notification's STOP action routes
+          through ctrlRef → pause().
+
+      Both fixes verified via tsc --noEmit and metro bundling.
 
       (1) **TTS background playback** — MediaSession API + Foreground
           Service implementation:

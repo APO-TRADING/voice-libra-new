@@ -61,7 +61,14 @@ export default function Player() {
         if (mounted) setLoading(false);
       }
     })();
-    return () => { mounted = false; player.pause(); };
+    // PATCH (beppe-audiobooks v6.1): do NOT pause on unmount. The user may
+    // navigate away from the player while the audiobook keeps reading in
+    // the background (foreground service + lock-screen controls). When
+    // they tap another book, player.load() will internally pause the
+    // previous session. When they tap "Stop" in the notification, the
+    // native service emits ACTION_STOP which routes to pause() via the
+    // ctrlRef. So leaving this useEffect without a pause() is correct.
+    return () => { mounted = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
