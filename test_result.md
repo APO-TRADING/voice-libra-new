@@ -353,7 +353,45 @@ agent_communication:
       Tested via tsc --noEmit and metro bundling, no errors.
   - agent: "main"
     message: |
-      v6.2 (post-Expo-Go PDF crash report) — Real fix:
+      v6.3 — REAL ROOT CAUSE found for PDF upload crash on Expo Go.
+
+      It was NOT URLSearchParams. It was DOMException.
+
+      Stack trace from the user's screenshot pointed at extractors.ts:209
+      (the require of pdfjs-dist). Grepping pdf.js for `.prototype` access
+      revealed line 5863:
+        var DOMExceptionPrototype = $DOMException.prototype = NativeDOMException.prototype;
+      where `NativeDOMException = getBuiltIn('DOMException')`. On Hermes
+      (the JS engine shipped with Expo Go), `globalThis.DOMException` is
+      undefined → `NativeDOMException.prototype` throws synchronously at
+      module-load time. No try/catch can rescue it because the throw
+      happens BEFORE pdf.js sets up its own error handling. The error
+      bubbles up through require() as the cryptic "Cannot read property
+      'prototype' of undefined".
+
+      The user reported "PDFs used to work before today's changes"; what
+      probably changed under their feet is the Expo Go version on their
+      device (Expo Go ships a baked-in Hermes — Expo SDK 53 → 54 dropped
+      DOMException from its Hermes build).
+
+      v6.3 FIX in src/storage/extractors.ts loadPdfjs():
+        • Added a full DOMException polyfill BEFORE the require. It's an
+          Error subclass with the standard `name`, `message`, `code` plus
+          the 25 standard DOMException numeric codes (INDEX_SIZE_ERR,
+          HIERARCHY_REQUEST_ERR, ABORT_ERR, etc.) attached both to the
+          constructor and the prototype — pdf.js copies them onto its own
+          polyfilled DOMException at module-load (line 5878+), so they
+          must exist.
+        • Kept the v6.2 react-native-url-polyfill/auto in _layout.tsx as
+          a safety net for URL/URLSearchParams (best practice in RN even
+          if not strictly needed here).
+        • Kept the try/catch around require() with a helpful error msg.
+
+      The APK (EAS build) is unaffected: it uses native expo-pdf-text-extract
+      (PDFBox), which never even loads pdfjs-dist.
+
+      Verified: tsc --noEmit exit 0. Metro Android bundle 25s, 3426 modules,
+      no errors. Web bundle clean too.
 
       The v6.1 stubs for URL/URLSearchParams were both INSUFFICIENT and
       MIS-PLACED:

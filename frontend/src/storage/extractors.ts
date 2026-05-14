@@ -195,13 +195,47 @@ function loadPdfjs(): any {
   if (typeof g.DOMMatrix === 'undefined') g.DOMMatrix = function () { /* stub */ };
   if (typeof g.Path2D === 'undefined') g.Path2D = function () { /* stub */ };
 
-  // PATCH (beppe-audiobooks v6.2): URL/URLSearchParams are now polyfilled
-  // globally in app/_layout.tsx via `react-native-url-polyfill/auto` (a
-  // full WHATWG-compliant implementation). The previous attempt with empty
-  // function stubs inside loadPdfjs() was both too late (pdf.js touches
-  // URLSearchParams.prototype at module-load, before this function runs)
-  // and incomplete (only stubs `prototype`, not the methods pdf.js may
-  // call afterwards).
+  // PATCH (beppe-audiobooks v6.3): DOMException — Hermes (Expo Go) does NOT
+  // expose DOMException as a global. pdfjs-dist 3.11 uses it at MODULE-LOAD
+  // (line 5863 of legacy/build/pdf.js):
+  //   var DOMExceptionPrototype = $DOMException.prototype = NativeDOMException.prototype;
+  // If NativeDOMException is undefined, `.prototype` throws "Cannot read
+  // property 'prototype' of undefined" — and there's no try/catch around
+  // that line in pdf.js, so the entire require() rejects.
+  // We provide a minimal but spec-shaped polyfill (Error subclass with
+  // `name`, `code`, `message` + the constant codes that pdfjs may use).
+  if (typeof g.DOMException === 'undefined') {
+    const DOMExceptionPolyfill: any = function DOMException(message?: string, name?: string) {
+      const inst: any = new Error(message || '');
+      inst.name = name || 'Error';
+      inst.message = message || '';
+      inst.code = 0;
+      // make instanceof work for both Error and DOMException
+      Object.setPrototypeOf(inst, DOMExceptionPolyfill.prototype);
+      return inst;
+    };
+    DOMExceptionPolyfill.prototype = Object.create(Error.prototype);
+    DOMExceptionPolyfill.prototype.constructor = DOMExceptionPolyfill;
+    DOMExceptionPolyfill.prototype.name = 'DOMException';
+    // The constants pdfjs reads from DOMException.* (and may copy onto its
+    // own polyfilled DOMException). Keys are the standard DOMException
+    // codes (INDEX_SIZE_ERR through DATA_CLONE_ERR).
+    const codes: Record<string, number> = {
+      INDEX_SIZE_ERR: 1, DOMSTRING_SIZE_ERR: 2, HIERARCHY_REQUEST_ERR: 3,
+      WRONG_DOCUMENT_ERR: 4, INVALID_CHARACTER_ERR: 5, NO_DATA_ALLOWED_ERR: 6,
+      NO_MODIFICATION_ALLOWED_ERR: 7, NOT_FOUND_ERR: 8, NOT_SUPPORTED_ERR: 9,
+      INUSE_ATTRIBUTE_ERR: 10, INVALID_STATE_ERR: 11, SYNTAX_ERR: 12,
+      INVALID_MODIFICATION_ERR: 13, NAMESPACE_ERR: 14, INVALID_ACCESS_ERR: 15,
+      VALIDATION_ERR: 16, TYPE_MISMATCH_ERR: 17, SECURITY_ERR: 18,
+      NETWORK_ERR: 19, ABORT_ERR: 20, URL_MISMATCH_ERR: 21,
+      QUOTA_EXCEEDED_ERR: 22, TIMEOUT_ERR: 23, INVALID_NODE_TYPE_ERR: 24,
+      DATA_CLONE_ERR: 25,
+    };
+    for (const [k, v] of Object.entries(codes)) {
+      try { DOMExceptionPolyfill[k] = v; DOMExceptionPolyfill.prototype[k] = v; } catch { /* ignore */ }
+    }
+    g.DOMException = DOMExceptionPolyfill;
+  }
 
   // pdfjs-dist 3.x CJS build (no import.meta — RN/Hermes friendly).
   // eslint-disable-next-line @typescript-eslint/no-require-imports
