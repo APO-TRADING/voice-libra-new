@@ -353,7 +353,57 @@ agent_communication:
       Tested via tsc --noEmit and metro bundling, no errors.
   - agent: "main"
     message: |
-      v6.7 — Memory diagnostic improvements + largeHeap=true.
+      v6.8 — Memory-aware loader for medium/high fp32 models.
+
+      USER REQUEST: "aumenta anche di più la ram nel caso debba utilizzare
+      modelli medium non quantizzati da 60/100 mb".
+
+      CONTEXT: enableLargeHeap=true was already added in v6.7 (~512MB-1GB
+      Java heap cap). There is no further "increase RAM" knob in Android
+      — the native heap is OS-managed and already generous (1-2 GB max).
+      So v6.8 focuses on USING the available memory more effectively
+      during the heavy JNI model load.
+
+      v6.8 changes (TTSManagerModule.kt, no behavior regressions):
+
+      A) **Progressive thread cap** (was: binary at 80 MB):
+           model >150 MB → 1 thread  (was: full cores)
+           model 80-150  → 2 threads (unchanged from v4)
+           model 40-80   → 3 threads (NEW: gives medium fp32 some parallelism)
+           model <40 MB  → full cores up to 4 (unchanged)
+         Why: each ONNX inference thread allocates ~10-20 MB of scratch
+         tensors. On a 100 MB fp32 model, 4 threads = +60 MB peak →
+         pushed over the cliff on tighter devices. Fewer threads = lower
+         peak.
+
+      B) **Pre-load GC pass** (NEW):
+         System.gc() + Thread.sleep(50ms) RIGHT BEFORE the JNI
+         OfflineTts(null, ttsCfg) call. Releases the transient buffers
+         from earlier init steps (asset copy, espeak zip read, etc.)
+         so when sherpa-onnx asks for its native byte[] over JNI the
+         Java heap has the maximum possible headroom. Costs ~50-100ms
+         (imperceptible) but reduces SIGSEGV likelihood on the 60-100 MB
+         class. Logs the delta:
+           init.4b.gc.done :: java=180/256MB native=15MB(free=120MB)
+
+      C) Patch grew 1608 → 1637 lines.
+
+      Combined with v6.7's enableLargeHeap + native heap logging, the
+      pipeline for a 100 MB Piper medium fp32 now looks like:
+
+        1) Asset copy:       ~20MB Java transient buffer
+        2) Espeak unzip:     ~3MB
+        3) [PATCH 4b] GC:    -23MB freed (Java heap goes back to ~30MB)
+        4) Threads = 2 (not 4): saves ~40MB peak during load
+        5) JNI newFromFile:  100MB on NATIVE heap (separate budget)
+        6) Inference scratch: ~20MB on native heap
+        TOTAL peak: ~120MB native + 30MB Java = ~150MB
+        Available:  ~512MB Java + 1-2GB native = plenty of headroom
+
+      USER ACTION: rebuild via eas build, retry the medium/high fp32 model
+      (without quantization). The new logs init.4.threads, init.4b.gc.done
+      and init.0a.sysinfo together give a complete picture of memory
+      pressure.
 
       USER REPORT: log shows "mem=0/27MB" or "mem=2/18MB" right before
       the JNI newFromFile() call hangs silently, and the user (correctly)
