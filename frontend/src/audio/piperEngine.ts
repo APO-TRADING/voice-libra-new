@@ -314,21 +314,40 @@ async function verifyOnnxMagic(modelPath: string): Promise<OnnxHeaderInfo> {
 
     // Detect quantization from producer name (most reliable hint without
     // walking the full graph).
+    // PATCH (beppe-audiobooks v6.5): the previous logic flagged ANY model
+    // whose producer_name contained "quant" as quantized → false positive
+    // on models produced by our own scripts/quantize_to_int8.py (which
+    // does SAFE MatMul-only quantization that sherpa-onnx CAN load —
+    // I/O and activations stay fp32). Now we distinguish "safe-INT8"
+    // (~30-50% smaller) from "fully-INT8" (~75% smaller) by file size:
+    //   • Piper x_low fp32 = ~28MB → safe-INT8 ~15-18MB / fully ~7-9MB
+    //   • Piper medium fp32 = ~64MB → safe-INT8 ~25-35MB / fully ~15-18MB
+    //   • Piper high fp32 = ~108MB → safe-INT8 ~40-55MB / fully ~25-30MB
+    // Conservative cut-off: < 14 MB → likely fully-INT8 (block).
     const producerLower = (producerName || '').toLowerCase();
+    const sizeBytes = (info as any).size || 0;
+    const sizeMb = sizeBytes / 1024 / 1024;
     let isQuantized = false;
     let quantizationHint: string | undefined;
-    if (/quant/.test(producerLower)) {
+    const looksQuantized = /quant|int8|qdq|qoperator/.test(producerLower);
+    if (looksQuantized && sizeBytes && sizeMb < 14) {
       isQuantized = true;
-      quantizationHint = `producer "${producerName}" indica quantizzazione (INT8/INT4)`;
-    } else if (/int8|qdq|qoperator/.test(producerLower)) {
-      isQuantized = true;
-      quantizationHint = `producer "${producerName}" suggerisce quantizzazione`;
-    } else if ((info as any).size && (info as any).size < 30 * 1024 * 1024 &&
-               /pytorch/.test(producerLower)) {
-      // Standard Piper Italian "medium" is ~64MB, "low" ~28MB. Below 30MB
-      // for a PyTorch export is suspicious — flag as POSSIBLY quantized.
+      quantizationHint =
+        `producer "${producerName}" + dimensione ${sizeMb.toFixed(1)}MB suggeriscono ` +
+        `quantizzazione AGGRESSIVA (fully-INT8). Sherpa-ONNX Piper richiede I/O fp32 — ` +
+        `usa scripts/quantize_to_int8.py sul modello FP32 originale per ottenere un INT8 sicuro.`;
+    } else if (looksQuantized) {
+      // Likely safe MatMul-only quantization. Allow loading.
       isQuantized = false;
-      quantizationHint = `dimensione ${Math.round((info as any).size / 1024 / 1024)}MB inferiore ai Piper standard — possibilmente quantizzato o low-quality`;
+      quantizationHint =
+        `producer "${producerName}" indica quantizzazione, dimensione ${sizeMb.toFixed(1)}MB ` +
+        `compatibile con safe-INT8 (solo pesi MatMul, I/O fp32). Caricamento permesso.`;
+    } else if (sizeBytes && sizeMb < 20 && /pytorch/.test(producerLower)) {
+      // Standard Piper Italian "medium" is ~64MB, "low" ~28MB. Below 20MB
+      // for a PyTorch export is suspicious — flag as POSSIBLY low-quality
+      // but do NOT block.
+      isQuantized = false;
+      quantizationHint = `dimensione ${sizeMb.toFixed(1)}MB inferiore ai Piper standard — potrebbe essere x_low o quantizzato`;
     }
 
     return {

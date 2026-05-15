@@ -353,7 +353,43 @@ agent_communication:
       Tested via tsc --noEmit and metro bundling, no errors.
   - agent: "main"
     message: |
-      v6.4 — Mini-player bar + "now playing" indicator + back-into-player fix.
+      v6.5 — Fix falso positivo blocker INT8 in piperEngine.ts.
+
+      USER REPORT: "ho provato INT8 con scripts/quantize_to_int8.py e
+      l'app dice che il modello è quantizzato e lo blocca."
+
+      ROOT CAUSE: il parser ONNX nel JS-side controllava se
+      producer_name contenesse "/quant/" e in tal caso flaggava il
+      modello come quantizzato. Ma `onnxruntime.quantization`
+      (la libreria che il nostro script Python usa per fare
+      MatMul-only weight quantization) imposta esattamente
+      producer_name = "onnxruntime.quantization" sull'output. La regex
+      matchava "**quant**ization" → falso positivo → il modello safe
+      veniva bloccato anche se sherpa-onnx era perfettamente in grado
+      di caricarlo (I/O e activations restano fp32).
+
+      FIX CONSERVATIVO in src/audio/piperEngine.ts (~40 righe modificate,
+      nessun'altra modifica al file):
+        • Mantenuto il check `/quant|int8|qdq|qoperator/` come PRIMO segnale
+        • Aggiunto un secondo segnale: la dimensione del file.
+            - Piper x_low fp32 = ~28MB → safe-INT8 ~15-18MB / fully-INT8 ~7-9MB
+            - Piper medium fp32 = ~64MB → safe-INT8 ~25-35MB / fully-INT8 ~15-18MB
+            - Piper high fp32 = ~108MB → safe-INT8 ~40-55MB / fully-INT8 ~25-30MB
+          Cut-off: < 14 MB → bloccato (fully-INT8); >= 14 MB → permesso
+          (safe-INT8 MatMul-only).
+        • L'hint diagnostico riflette il nuovo ragionamento, indicando
+          quando viene bloccato e perché.
+
+      Effetto:
+        • Modelli generati dal nostro scripts/quantize_to_int8.py (con
+          op_types_to_quantize=['MatMul'], I/O fp32) → ORA caricano
+          normalmente. La JS-side non blocca più.
+        • Modelli "fully INT8" (es. quantize_dynamic senza filtri op,
+          con I/O int8) → ancora bloccati come prima.
+
+      Tested: tsc --noEmit clean, Metro bundle 4944ms / 3052 modules
+      / 0 errors. Non serve EAS rebuild — fix solo JS, basta ricaricare
+      Expo Go o reinstallare l'APK col bundle aggiornato.
 
       USER REQUEST: while a book is playing, navigating away from the
       Player screen should leave a persistent control bar at the bottom
