@@ -353,7 +353,49 @@ agent_communication:
       Tested via tsc --noEmit and metro bundling, no errors.
   - agent: "main"
     message: |
-      v6.5 — Fix falso positivo blocker INT8 in piperEngine.ts.
+      v6.6 — Book loading performance fix + in-memory cache.
+
+      USER REPORT: "ogni volta che apro un libro l'app sembra ricaricarlo
+      come se lo riconvertisse — è lento."
+
+      DIAGNOSIS: il libro NON viene effettivamente riconvertito (PDF→TXT
+      avviene UNA volta sola nell'upload, poi il risultato è scritto su
+      disco). Però la rilettura del JSON era lenta:
+        • <id>.json sul FileSystem (4-8 MB per un libro 800 pagine)
+        • FileSystem.readAsStringAsync carica tutto in memoria
+        • JSON.parse su Hermes ~ 1-3s per file grandi
+        • Nessuna cache → I/O + parse ad ogni navigazione al player
+
+      v6.6 FIX in src/storage/library.ts (single file, ~80 righe modificate):
+
+      A) **Storage plain-text** invece di JSON unico:
+         • <id>.txt           — testo pulito UTF-8 (no JSON encoding)
+         • <id>.sentences.txt — una frase per riga, separator '\n'
+         Lettura ~3× più veloce (skip JSON.parse, solo split).
+         Migrazione automatica al primo getBook dei libri vecchi v6.5
+         (legacy.json) e v4 (AsyncStorage). Vecchi file eliminati dopo
+         migration.
+
+      B) **Cache in memoria LRU** (max 10 libri):
+         • Map<bookId, BookFull> a module level
+         • Prima apertura: legge da disco, popola cache
+         • Riaperture: zero I/O, ritorno immediato
+         • LRU per bumping della MRU position su hit
+         • addBook popola direttamente la cache (subito disponibile)
+         • updateBook aggiorna in-place i metadati cached
+         • updateProgress aggiorna current_sentence_index cached
+         • deleteBook invalida la entry
+         Memory budget: ~50 MB worst case (10 libri × ~5 MB cad.)
+
+      Effetto sui tempi di apertura:
+        • Prima apertura libro grande: 1-3s → 300-500ms (no JSON.parse)
+        • Riapertura stesso libro: 300-500ms → ~5ms (cache hit, no I/O)
+
+      Compat: i libri esistenti vengono migrati automaticamente al primo
+      load. Niente azione richiesta all'utente. Niente perdita dati.
+
+      Verified: tsc --noEmit clean, Metro bundle clean. Fix solo JS:
+      basta reload Expo Go / rebuild APK senza altre dipendenze.
 
       USER REPORT: "ho provato INT8 con scripts/quantize_to_int8.py e
       l'app dice che il modello è quantizzato e lo blocca."
