@@ -353,7 +353,57 @@ agent_communication:
       Tested via tsc --noEmit and metro bundling, no errors.
   - agent: "main"
     message: |
-      v6.6 — Book loading performance fix + in-memory cache.
+      v6.7 — Memory diagnostic improvements + largeHeap=true.
+
+      USER REPORT: log shows "mem=0/27MB" or "mem=2/18MB" right before
+      the JNI newFromFile() call hangs silently, and the user (correctly)
+      suspected a memory issue. INVESTIGATION clarified that those
+      numbers were the JAVA heap (Runtime.getRuntime()), NOT the native
+      heap where sherpa-onnx allocates the ONNX model. So the original
+      log was misleading and didn't reflect the real OOM risk.
+
+      v6.7 fixes (additive only, no behavior regressions):
+
+      A) **app.json**: `expo.android.enableLargeHeap: true` (via
+         expo-build-properties). This bumps the per-app Java heap cap
+         from ~256MB (default) to ~512MB on most devices. Not strictly
+         required for the ONNX file load (which uses native heap), but
+         provides headroom for the JNI byte[] buffers that ferry the
+         model bytes from Java → C++.
+
+      B) **TTSManagerModule.kt** — improved memory probe:
+         BEFORE: mem=${freeMb}/${totalMb}MB max=${maxMb}MB  (Java only)
+         AFTER:
+           java=${freeMb}/${totalMb}/${maxMb}MB
+           native=${nativeAllocMb}/${nativeSizeMb}MB(free=${nativeFreeMb}MB)
+           system=${sysAvailMb}/${sysTotalMb}MB(low<${threshMb}MB,lowOn=${mi.lowMemory})
+         Uses android.os.Debug.getNativeHeap*() for the C++ side and
+         ActivityManager.getMemoryInfo() for the system-wide view.
+
+         Now the user can see at-a-glance whether the JNI crash is due
+         to:
+          - native heap exhaustion (sherpa-onnx 1.12.26 has a known issue
+            with very large fp32 models on low-RAM devices, but a 18MB
+            INT8 should be fine)
+          - OS-wide low-memory (mi.lowMemory=true)
+          - actually plenty of memory available (= the crash is NOT OOM
+            but something inside the ONNX parser, probably the unsupported
+            MatMulInteger op or a model-format incompatibility in
+            sherpa-onnx 1.12.26's bundled onnxruntime).
+
+      Patch grew 1589 → 1608 lines. tsc --noEmit clean.
+
+      USER ACTION REQUIRED for the INT8 issue:
+        1) Rebuild APK with `eas build --platform android --profile preview`.
+        2) Try the INT8 model again.
+        3) Send the NEW log line `init.0a.sysinfo` — we'll now have full
+           memory picture (Java + native + system) at the moment of the
+           JNI call.
+        4) If the new log shows plenty of native heap free (e.g.
+           native=10/200MB free=190MB) AND the crash STILL happens, the
+           problem is NOT memory — it's the ONNX content itself (likely
+           MatMulInteger op not supported by sherpa-onnx 1.12.26's
+           bundled onnxruntime).
 
       USER REPORT: "ogni volta che apro un libro l'app sembra ricaricarlo
       come se lo riconvertisse — è lento."

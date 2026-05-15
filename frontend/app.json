@@ -55,7 +55,8 @@
             "minSdkVersion": 24,
             "extraMavenRepos": [
               "https://jitpack.io"
-            ]
+            ],
+            "enableLargeHeap": true
           },
           "ios": {
             "deploymentTarget": "15.1"

@@ -1004,7 +1004,7 @@ index 0000000..d82e503
 +    }
 +}
 diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
-index f76e886..a3a4ed3 100644
+index f76e886..f3cae44 100644
 --- a/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
 +++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/src/main/java/com/sherpaonnxofflinetts/TTSManagerModule.kt
 @@ -8,9 +8,25 @@ import kotlin.concurrent.thread
@@ -1033,7 +1033,7 @@ index f76e886..a3a4ed3 100644
  class ModelLoader(private val context: Context) {
  
      /**
-@@ -86,68 +102,313 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -86,68 +102,332 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
      @Volatile private var stopping = false
      private var pendingPromise: Promise? = null
  
@@ -1105,15 +1105,34 @@ index f76e886..a3a4ed3 100644
 +        val t0 = System.currentTimeMillis()
 +        nativeTrace(reactContext, "init.0.enter", "sr=${sampleRate.toInt()} ch=$channels modelIdLen=${modelId.length}")
 +
-+        // 0a. System info
++        // 0a. System info — including BOTH the Java heap (mostly irrelevant
++        // for the JNI ONNX load) AND the native heap (which is where the
++        // sherpa-onnx OfflineTts actually allocates the model weights).
 +        try {
 +            val rt = Runtime.getRuntime()
 +            val totalMb = rt.totalMemory() / (1024 * 1024)
 +            val freeMb = rt.freeMemory() / (1024 * 1024)
 +            val maxMb = rt.maxMemory() / (1024 * 1024)
++            // PATCH (beppe-audiobooks v6.7): native heap stats. This is the
++            // memory pool the JNI ONNX runtime allocates from. Numbers from
++            // Runtime.* refer to the JAVA heap only and were misleading.
++            val nativeAlloc = android.os.Debug.getNativeHeapAllocatedSize() / (1024 * 1024)
++            val nativeSize = android.os.Debug.getNativeHeapSize() / (1024 * 1024)
++            val nativeFree = android.os.Debug.getNativeHeapFreeSize() / (1024 * 1024)
++            // System-wide free memory (so we can prove the device is not
++            // RAM-starved even when the JVM looks small).
++            val mi = android.app.ActivityManager.MemoryInfo()
++            val am = reactContext.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
++            am.getMemoryInfo(mi)
++            val sysAvailMb = mi.availMem / (1024 * 1024)
++            val sysTotalMb = mi.totalMem / (1024 * 1024)
++            val sysThreshMb = mi.threshold / (1024 * 1024)
 +            val abi = android.os.Build.SUPPORTED_ABIS.joinToString(",")
 +            nativeTrace(reactContext, "init.0a.sysinfo",
-+                "abi=$abi sdk=${android.os.Build.VERSION.SDK_INT} model=${android.os.Build.MODEL} mem=${freeMb}/${totalMb}MB max=${maxMb}MB")
++                "abi=$abi sdk=${android.os.Build.VERSION.SDK_INT} model=${android.os.Build.MODEL} " +
++                "java=${freeMb}/${totalMb}/${maxMb}MB " +
++                "native=${nativeAlloc}/${nativeSize}MB(free=${nativeFree}MB) " +
++                "system=${sysAvailMb}/${sysTotalMb}MB(low<${sysThreshMb}MB,lowOn=${mi.lowMemory})")
 +        } catch (e: Throwable) {
 +            nativeTrace(reactContext, "init.0a.sysinfo.err", e.message ?: "?")
 +        }
@@ -1130,7 +1149,7 @@ index f76e886..a3a4ed3 100644
 +                        pendingPromise = null
 +                        p?.resolve("Playback finished")
 +                    }
-+                }
+                 }
 +            })
 +            nativeTrace(reactContext, "init.1.audioplayer.new.ok", "instance=${realTimeAudioPlayer != null}")
 +        } catch (e: Throwable) {
@@ -1166,7 +1185,42 @@ index f76e886..a3a4ed3 100644
 +            if (!mf.canRead()) {
 +                nativeTrace(reactContext, "init.3a.model.check.FAIL", "file not readable")
 +                throw IllegalStateException("Model file not readable: $modelPath")
-+            }
+             }
+-        })
+-
+-
+-        // Determine model paths based on modelId
+-        
+-        // val modelDirAssetPath = "models"
+-        // val modelDirInternal = reactContext.filesDir
+-        // modelLoader.copyAssetDirectory(modelDirAssetPath, modelDirInternal)
+-        // val modelPath = File(modelDirInternal, if (modelId.lowercase() == "male") "en_US-ryan-medium.onnx" else "en_US-hfc_female-medium.onnx").absolutePath
+-        // val tokensPath = File(modelDirInternal, "tokens.txt").absolutePath
+-        // val dataDirPath = File(modelDirInternal, "espeak-ng-data").absolutePath // Directory copy handled above
+-
+-        val jsonObject = JSONObject(modelId)
+-        val modelPath = jsonObject.getString("modelPath")
+-        val tokensPath = jsonObject.getString("tokensPath")
+-        val dataDirPath = jsonObject.getString("dataDirPath")
+-
+-        // Build OfflineTtsConfig using the helper function
+-        val config = OfflineTtsConfig(
+-            model=OfflineTtsModelConfig(
+-              vits=OfflineTtsVitsModelConfig(
+-                model=modelPath,
+-                tokens=tokensPath,
+-                dataDir=dataDirPath,
+-              ),
+-              numThreads=1,
+-              debug=true,
+-            )
+-          )
+-
+-        // Initialize sherpa-onnx offline TTS
+-        tts = OfflineTts(config=config)
+-
+-        // Start the audio player
+-        realTimeAudioPlayer?.start()
 +            val size = mf.length()
 +            if (size == 0L) {
 +                nativeTrace(reactContext, "init.3a.model.check.FAIL", "file is 0 bytes")
@@ -1319,47 +1373,12 @@ index f76e886..a3a4ed3 100644
 +                    try { candidate.release() } catch (re: Throwable) {
 +                        nativeTrace(reactContext, "init.5h.release.err", "${re.javaClass.simpleName}: ${re.message}")
 +                    }
-                 }
++                }
 +            } catch (e: Throwable) {
 +                lastErr = "${e.javaClass.simpleName}: ${e.message}"
 +                val st = e.stackTrace.take(3).joinToString(" | ") { "${it.className}.${it.methodName}:${it.lineNumber}" }
 +                nativeTrace(reactContext, "init.5.provider.THREW", "[$provider] $lastErr | stack=$st")
-             }
--        })
--
--
--        // Determine model paths based on modelId
--        
--        // val modelDirAssetPath = "models"
--        // val modelDirInternal = reactContext.filesDir
--        // modelLoader.copyAssetDirectory(modelDirAssetPath, modelDirInternal)
--        // val modelPath = File(modelDirInternal, if (modelId.lowercase() == "male") "en_US-ryan-medium.onnx" else "en_US-hfc_female-medium.onnx").absolutePath
--        // val tokensPath = File(modelDirInternal, "tokens.txt").absolutePath
--        // val dataDirPath = File(modelDirInternal, "espeak-ng-data").absolutePath // Directory copy handled above
--
--        val jsonObject = JSONObject(modelId)
--        val modelPath = jsonObject.getString("modelPath")
--        val tokensPath = jsonObject.getString("tokensPath")
--        val dataDirPath = jsonObject.getString("dataDirPath")
--
--        // Build OfflineTtsConfig using the helper function
--        val config = OfflineTtsConfig(
--            model=OfflineTtsModelConfig(
--              vits=OfflineTtsVitsModelConfig(
--                model=modelPath,
--                tokens=tokensPath,
--                dataDir=dataDirPath,
--              ),
--              numThreads=1,
--              debug=true,
--            )
--          )
--
--        // Initialize sherpa-onnx offline TTS
--        tts = OfflineTts(config=config)
--
--        // Start the audio player
--        realTimeAudioPlayer?.start()
++            }
 +        }
 +
 +        if (createdTts == null) {
@@ -1394,7 +1413,7 @@ index f76e886..a3a4ed3 100644
              promise.reject("EMPTY_TEXT", "Input text is empty")
              return
          }
-@@ -155,6 +416,7 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -155,6 +435,7 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
          val player = realTimeAudioPlayer
          val engine = tts
          if (player == null || engine == null) {
@@ -1402,7 +1421,7 @@ index f76e886..a3a4ed3 100644
              promise.reject("NOT_INITIALIZED", "TTS is not initialized")
              return
          }
-@@ -167,18 +429,29 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -167,18 +448,29 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
          val playbackId = playbackSeq
          activePlaybackId = playbackId
  
@@ -1437,7 +1456,7 @@ index f76e886..a3a4ed3 100644
              pendingPromise = null
              promise.reject("GENERATION_ERROR", "Error during audio generation: ${e.message}")
          }
-@@ -203,6 +476,119 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -203,6 +495,119 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
          stopping = false
      }
  
@@ -1557,7 +1576,7 @@ index f76e886..a3a4ed3 100644
      @ReactMethod
      fun generateAndSave(text: String, path: String?, fileType: String?, promise: Promise) {
          val trimmed = text.trim()
-@@ -290,17 +676,26 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
+@@ -290,17 +695,26 @@ class TTSManagerModule(private val reactContext: ReactApplicationContext) : Reac
      }
  
      private fun generateAudio(text: String, sid: Int, speed: Float) {
