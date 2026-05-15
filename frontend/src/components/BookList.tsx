@@ -11,6 +11,7 @@ import {
   Grid3x3,
   List as ListIcon,
   MoreVertical,
+  Pause,
   Play,
   Search,
   Trash2,
@@ -33,6 +34,7 @@ import {
   View,
 } from 'react-native';
 import { api, BookSummary, Folder, SortMode } from '../api/client';
+import { usePlayer } from '../contexts/PlayerContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { useT } from '../i18n';
 import BookEditModal from './BookEditModal';
@@ -75,6 +77,12 @@ export default function BookList({
 }: Props) {
   const { colors, viewMode, setViewMode } = useTheme();
   const t = useT();
+  // PATCH (beppe-audiobooks v6.4): subscribe to the live player state so
+  // the row representing the currently-playing book can show a "live"
+  // badge instead of the regular Play button.
+  const player = usePlayer();
+  const activeBookId = player.bookId;
+  const activeIsPlaying = player.isPlaying;
   const [sortMode, setSortModeLocal] = useState<SortMode>('recent');
   const [manualMode, setManualMode] = useState(false);
   const [actionFor, setActionFor] = useState<BookSummary | null>(null);
@@ -277,12 +285,16 @@ export default function BookList({
           numColumns={2}
           keyExtractor={(b) => b.id}
           columnWrapperStyle={{ gap: 16, paddingHorizontal: 24 }}
-          contentContainerStyle={{ gap: 24, paddingVertical: 16, paddingBottom: 96 }}
+          // PATCH (beppe-audiobooks v6.4): extra bottom padding so the
+          // last row isn't covered by the floating MiniPlayer pill.
+          contentContainerStyle={{ gap: 24, paddingVertical: 16, paddingBottom: activeBookId ? 168 : 96 }}
           keyboardShouldPersistTaps="handled"
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primaryActive} />
           }
-          renderItem={({ item, index }) => (
+          renderItem={({ item, index }) => {
+            const isActive = activeBookId === item.id;
+            return (
             <View style={styles.gridCard}>
               <TouchableOpacity
                 testID={`book-card-${item.id}`}
@@ -291,10 +303,31 @@ export default function BookList({
                 activeOpacity={0.85}
                 style={{ gap: 8 }}
               >
-                <Image
-                  source={{ uri: coverFor(item) }}
-                  style={[styles.cover, { backgroundColor: colors.surface }]}
-                />
+                <View>
+                  <Image
+                    source={{ uri: coverFor(item) }}
+                    style={[
+                      styles.cover,
+                      {
+                        backgroundColor: colors.surface,
+                        borderWidth: isActive ? 2 : 0,
+                        borderColor: isActive ? colors.primaryActive : 'transparent',
+                      },
+                    ]}
+                  />
+                  {isActive ? (
+                    <View style={[styles.nowBadge, { backgroundColor: colors.primaryActive }]}>
+                      {activeIsPlaying ? (
+                        <Pause color="#0A0A0C" size={11} fill="#0A0A0C" />
+                      ) : (
+                        <Play color="#0A0A0C" size={11} fill="#0A0A0C" />
+                      )}
+                      <Text style={[styles.nowBadgeLabel, { color: '#0A0A0C' }]} numberOfLines={1}>
+                        {activeIsPlaying ? t('library.nowPlaying') : t('library.paused')}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
                 <View style={[styles.progressTrack, { backgroundColor: colors.border }]}>
                   <View
                     style={[
@@ -344,22 +377,32 @@ export default function BookList({
                 </View>
               ) : null}
             </View>
-          )}
+            );
+          }}
         />
       ) : (
         <FlatList
           key="list"
           data={sortedBooks}
           keyExtractor={(b) => b.id}
-          contentContainerStyle={{ paddingHorizontal: 24, paddingBottom: 96, gap: 12, paddingTop: 8 }}
+          contentContainerStyle={{ paddingHorizontal: 24, paddingBottom: activeBookId ? 168 : 96, gap: 12, paddingTop: 8 }}
           keyboardShouldPersistTaps="handled"
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primaryActive} />
           }
-          renderItem={({ item, index }) => (
+          renderItem={({ item, index }) => {
+            const isActive = activeBookId === item.id;
+            return (
             <TouchableOpacity
               testID={`book-row-${item.id}`}
-              style={[styles.listRow, { backgroundColor: colors.surface, borderColor: colors.border }]}
+              style={[
+                styles.listRow,
+                {
+                  backgroundColor: colors.surface,
+                  borderColor: isActive ? colors.primaryActive : colors.border,
+                  borderWidth: isActive ? 2 : 1,
+                },
+              ]}
               onPress={() => router.push(`/player/${item.id}`)}
               onLongPress={() => onLongPress(item)}
               activeOpacity={0.85}
@@ -374,8 +417,10 @@ export default function BookList({
                     {item.author}
                   </Text>
                 ) : null}
-                <Text style={[styles.gridMeta, { color: colors.textSecondary }]}>
-                  {t('library.book.wordCount', { percent: progressPct(item), count: item.word_count })}
+                <Text style={[styles.gridMeta, { color: isActive ? colors.primaryActive : colors.textSecondary }]}>
+                  {isActive
+                    ? (activeIsPlaying ? t('library.nowPlaying') : t('library.paused'))
+                    : t('library.book.wordCount', { percent: progressPct(item), count: item.word_count })}
                 </Text>
                 <View style={[styles.progressTrack, { backgroundColor: colors.border, marginTop: 2 }]}>
                   <View
@@ -417,11 +462,28 @@ export default function BookList({
                   <MoreVertical color={colors.textSecondary} size={18} />
                 </TouchableOpacity>
               )}
-              <View style={[styles.playBtnSmall, { backgroundColor: colors.primaryActive }]}>
-                <Play color="#0A0A0C" size={16} fill="#0A0A0C" />
-              </View>
+              {/* PATCH (v6.4): if this row is the live book, the action
+                  button toggles play/pause; otherwise it stays decorative
+                  (the whole row navigates to the player on press). */}
+              <TouchableOpacity
+                testID={`book-row-action-${item.id}`}
+                disabled={!isActive}
+                onPress={(e) => {
+                  if (!isActive) return;
+                  e.stopPropagation();
+                  player.toggle();
+                }}
+                style={[styles.playBtnSmall, { backgroundColor: colors.primaryActive }]}
+              >
+                {isActive && activeIsPlaying ? (
+                  <Pause color="#0A0A0C" size={16} fill="#0A0A0C" />
+                ) : (
+                  <Play color="#0A0A0C" size={16} fill="#0A0A0C" />
+                )}
+              </TouchableOpacity>
             </TouchableOpacity>
-          )}
+            );
+          }}
         />
       )}
 
@@ -592,6 +654,22 @@ const styles = StyleSheet.create({
   listAuthor: { fontSize: 12, fontStyle: 'italic' },
   moreBtn: { width: 32, height: 32, borderRadius: 999, alignItems: 'center', justifyContent: 'center' },
   playBtnSmall: { width: 40, height: 40, borderRadius: 999, alignItems: 'center', justifyContent: 'center' },
+  // PATCH (v6.4): "now-playing" / "paused" overlay sitting at the top-left
+  // of the grid-card cover. Same shape as a pill button so it reads as an
+  // active state badge rather than a meta-data tag.
+  nowBadge: {
+    position: 'absolute',
+    top: 8,
+    left: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    maxWidth: '90%',
+  },
+  nowBadgeLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.8 },
   sheetBg: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   sheet: { padding: 16, borderTopLeftRadius: 24, borderTopRightRadius: 24, borderWidth: 1, gap: 4, paddingBottom: 32 },
   sheetTitle: { fontSize: 16, fontWeight: '700', paddingHorizontal: 8, paddingTop: 4 },

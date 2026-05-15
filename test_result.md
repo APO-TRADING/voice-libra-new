@@ -353,7 +353,41 @@ agent_communication:
       Tested via tsc --noEmit and metro bundling, no errors.
   - agent: "main"
     message: |
-      v6.3 — REAL ROOT CAUSE found for PDF upload crash on Expo Go.
+      v6.4 — Mini-player bar + "now playing" indicator + back-into-player fix.
+
+      USER REQUEST: while a book is playing, navigating away from the
+      Player screen should leave a persistent control bar at the bottom
+      of the library / folders / settings tabs so the user can pause,
+      resume, stop or jump back into the player. Also, re-entering the
+      player for the SAME book was incorrectly resetting the playback.
+
+      FILES:
+        • src/components/MiniPlayer.tsx (NEW) — floating pill above the
+          tab bar showing cover + title + author + progress + Pause/Play
+          + Stop. Tap the body → navigate to /player/<bookId>. Tap a
+          control → stopPropagation. Renders nothing when bookId is null.
+        • app/(tabs)/_layout.tsx — Tabs now wrapped in a View; MiniPlayer
+          is positioned absolutely at `bottom: tabBarHeight` (so it sits
+          ABOVE the tab bar in every tab). pointerEvents=box-none lets
+          touches pass through to the screen content.
+        • src/contexts/PlayerContext.tsx — load(id) now early-returns if
+          bookIdRef.current === id. Previously, re-entering the player
+          for the currently-playing book ran pause()+full reset, which
+          interrupted the TTS mid-sentence. NEW behavior: re-entry is a
+          no-op; pause() only happens when switching to a different book.
+        • src/components/BookList.tsx — subscribes to PlayerContext via
+          usePlayer(). Grid: pill badge "IN ASCOLTO" / "IN PAUSA" overlaid
+          on the active book's cover, primary-colored border. List: the
+          Play button becomes a Pause when active; tapping it toggles
+          playback in-place (no navigation). FlatList paddingBottom
+          extended from 96 to 168 when a book is active so the last row
+          isn't covered by the mini-player.
+        • src/i18n/locales/*.ts — added `library.nowPlaying` /
+          `library.paused` in all 5 languages.
+
+      Tested: tsc --noEmit clean. Metro bundle clean. Web preview shows
+      empty library + correct tab bar; the MiniPlayer host is present
+      but invisible (bookId === null).
 
       It was NOT URLSearchParams. It was DOMException.
 

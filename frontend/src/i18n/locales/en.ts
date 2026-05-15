@@ -29,6 +29,8 @@ export const en: TranslationDict = {
   'library.search.placeholder': 'Search by title or author…',
   'library.empty.search': 'No books match your search.',
   'library.empty.generic': 'No books in the library.',
+  'library.nowPlaying': 'NOW PLAYING',
+  'library.paused': 'PAUSED',
   'library.bookCount.one': '{n} book',
   'library.bookCount.other': '{n} books',
   'library.bookCount.zero': '0 books',

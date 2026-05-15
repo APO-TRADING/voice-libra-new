@@ -326,6 +326,15 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   }, [pause]);
 
   const load = useCallback(async (id: string) => {
+    // PATCH (beppe-audiobooks v6.4): if the user re-enters the player for
+    // the book that is ALREADY playing (e.g. they tapped the mini-player
+    // or the library card while the book is being read), do NOT reset the
+    // playback state. The previous unconditional pause() + reload would
+    // stop the TTS mid-sentence and lose context. Just return — the live
+    // state (sentences, index, isPlaying, etc.) is already in the context.
+    if (bookIdRef.current === id) {
+      return;
+    }
     pause();
     const book: BookFull = await api.getBook(id);
     setBookId(book.id);

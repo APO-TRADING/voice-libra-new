@@ -33,6 +33,8 @@ export const it = {
   'library.search.placeholder': 'Cerca per titolo o autore…',
   'library.empty.search': 'Nessun libro corrisponde alla ricerca.',
   'library.empty.generic': 'Nessun libro nella libreria.',
+  'library.nowPlaying': 'IN ASCOLTO',
+  'library.paused': 'IN PAUSA',
   'library.bookCount.one': '{n} libro',
   'library.bookCount.other': '{n} libri',
   'library.bookCount.zero': '0 libri',
