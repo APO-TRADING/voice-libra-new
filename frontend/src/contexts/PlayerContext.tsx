@@ -1,5 +1,5 @@
 // Singleton on-device audio player.
-// Primary engine: react-native-sherpa-onnx-offline-tts (Piper, on-device).
+// Primary engine: piper-tts local native module (Microsoft ONNX Runtime + Piper VITS).
 // Fallback engine: expo-speech (used in Expo Go preview / when model assets
 // are not yet bundled).
 //

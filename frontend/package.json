@@ -8,8 +8,7 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "expo lint",
-    "postinstall": "patch-package"
+    "lint": "expo lint"
   },
   "dependencies": {
     "@babel/runtime": "^7.20.6",
@@ -57,7 +56,6 @@
     "react-native-reanimated": "~4.1.1",
     "react-native-safe-area-context": "~5.6.0",
     "react-native-screens": "~4.16.0",
-    "react-native-sherpa-onnx-offline-tts": "^0.2.6",
     "react-native-svg": "15.12.1",
     "react-native-url-polyfill": "^3.0.0",
     "react-native-web": "^0.21.0",
@@ -69,16 +67,12 @@
     "@types/react": "~19.1.0",
     "eslint": "^9.25.0",
     "eslint-config-expo": "~10.0.0",
-    "patch-package": "^8.0.1",
     "typescript": "~5.9.3"
   },
   "expo": {
     "doctor": {
       "reactNativeDirectoryCheck": {
-        "listUnknownPackages": false,
-        "exclude": [
-          "react-native-sherpa-onnx-offline-tts"
-        ]
+        "listUnknownPackages": false
       }
     }
   },

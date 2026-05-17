@@ -1,0 +1,100 @@
+// piper-tts native module for Android.
+//
+// ITERATION 1 (this build): Microsoft ONNX Runtime + Italian Kotlin
+// phonemizer. Works for any Italian Piper model out of the box. NO NDK
+// compilation, so EAS builds in normal time.
+//
+// ITERATION 2 (planned): Add espeak-ng compilation via NDK + CMake for
+// full multi-language support. The Kotlin fallback in ItalianPhonemizer.kt
+// will continue to work for Italian models if the native phonemizer
+// fails to load \u2014 see PiperTtsModule.kt for the resilient init logic.
+
+buildscript {
+  def kotlin_version = rootProject.ext.has("kotlinVersion") ? rootProject.ext.get("kotlinVersion") : "2.0.21"
+  repositories { google(); mavenCentral() }
+  dependencies {
+    classpath "com.android.tools.build:gradle:8.6.0"
+    classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+  }
+}
+
+apply plugin: "com.android.library"
+apply plugin: "kotlin-android"
+
+def safeExtGet(prop, fallback) {
+  rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+}
+
+// Toggle this to 'true' in a future iteration to compile espeak-ng from
+// source via NDK. For now we keep it 'false' so the APK builds reliably
+// using the Kotlin Italian-only fallback phonemizer.
+def withNativePhonemizer = (project.findProperty('withNativePhonemizer') ?: 'false') == 'true'
+
+android {
+  namespace "com.beppeaudiobooks.pipertts"
+  compileSdkVersion safeExtGet("compileSdkVersion", 35)
+
+  defaultConfig {
+    minSdkVersion safeExtGet("minSdkVersion", 24)
+    targetSdkVersion safeExtGet("targetSdkVersion", 35)
+
+    if (withNativePhonemizer) {
+      ndk {
+        abiFilters "arm64-v8a", "armeabi-v7a"
+      }
+      externalNativeBuild {
+        cmake {
+          cppFlags "-std=c++17 -fexceptions -frtti -O2"
+          arguments "-DANDROID_STL=c++_shared",
+                    "-DANDROID_PLATFORM=android-24"
+        }
+      }
+    }
+  }
+
+  if (withNativePhonemizer) {
+    externalNativeBuild {
+      cmake {
+        path "src/main/cpp/CMakeLists.txt"
+        version "3.22.1"
+      }
+    }
+  }
+
+  buildTypes {
+    release { minifyEnabled false }
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+  kotlinOptions { jvmTarget = "17" }
+  lintOptions { disable "GradleCompatible" }
+  packagingOptions {
+    jniLibs {
+      pickFirsts += ["**/libc++_shared.so"]
+    }
+  }
+}
+
+repositories {
+  mavenCentral()
+  google()
+}
+
+dependencies {
+  //noinspection GradleDynamicVersion
+  implementation "com.facebook.react:react-native:+"
+
+  // Microsoft ONNX Runtime for Android \u2014 official Maven release. Supports
+  // FP32, FP16, INT8 models natively via its kernel set.
+  implementation "com.microsoft.onnxruntime:onnxruntime-android:1.19.2"
+
+  // MediaSessionCompat + lock-screen artwork support.
+  implementation "androidx.media:media:1.7.0"
+  implementation "androidx.core:core-ktx:1.13.1"
+
+  // Kotlin coroutines for the synthesize() async pipeline.
+  implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1"
+}

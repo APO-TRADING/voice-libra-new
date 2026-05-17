@@ -1,18 +1,23 @@
 import Slider from '@react-native-community/slider';
-import { AlertCircle, AlertTriangle, Check, Copy, Cpu, Mic, Moon, Play, RefreshCw, Sun, X } from 'lucide-react-native';
+import { AlertCircle, AlertTriangle, Check, Copy, Cpu, Mic, Moon, Play, RefreshCw, Sun, X, Volume2 } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
-import { Alert, Clipboard, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Clipboard, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   clearPiperTrace,
   decodePiperError,
   DiagnosticItem,
+  getCurrentVoiceId,
   initEngine,
   isPiperReady,
+  listVoices,
   readPiperTrace,
+  reloadEngine,
   runFullDiagnostics,
+  setCurrentVoiceId,
   speakSentence,
 } from '../../src/audio/piperEngine';
+import type { VoiceMeta } from '../../src/audio/piperAssets';
 import { usePlayer } from '../../src/contexts/PlayerContext';
 import { useTheme } from '../../src/contexts/ThemeContext';
 import { SUPPORTED_LOCALES, SYSTEM, useI18n, useT } from '../../src/i18n';
@@ -26,6 +31,31 @@ export default function SettingsScreen() {
   const [trace, setTrace] = useState<string>('(caricamento...)');
   const [diagResults, setDiagResults] = useState<DiagnosticItem[] | null>(null);
   const [diagRunning, setDiagRunning] = useState(false);
+  // ----- Voice picker state -----
+  const [voices] = useState<VoiceMeta[]>(() => listVoices());
+  const [activeVoiceId, setActiveVoiceId] = useState<string>(voices[0]?.id ?? 'riccardo');
+  const [voiceSwitching, setVoiceSwitching] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try { setActiveVoiceId(await getCurrentVoiceId()); } catch { /* ignore */ }
+    })();
+  }, []);
+
+  const switchVoice = useCallback(async (id: string) => {
+    if (id === activeVoiceId || voiceSwitching) return;
+    setVoiceSwitching(true);
+    try {
+      await setCurrentVoiceId(id);
+      setActiveVoiceId(id);
+      // Trigger a background reload so the new voice is ready when the user hits Play.
+      await reloadEngine();
+    } catch (e: any) {
+      Alert.alert('Cambio voce fallito', String(e?.message || e));
+    } finally {
+      setVoiceSwitching(false);
+    }
+  }, [activeVoiceId, voiceSwitching]);
 
   const refreshTrace = useCallback(async () => {
     const t = await readPiperTrace();
@@ -182,6 +212,65 @@ export default function SettingsScreen() {
         </View>
       </View>
 
+      <Text style={[styles.section, { color: colors.textSecondary }]}>VOCE</Text>
+      <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border, paddingHorizontal: 12, paddingVertical: 10 }]}>
+        <Text style={[styles.rowMeta, { color: colors.textSecondary, paddingHorizontal: 4, marginBottom: 8 }]}>
+          {voiceSwitching
+            ? 'Cambio voce in corso...'
+            : 'Seleziona la voce Piper da usare per la lettura. Le voci aggiuntive si caricano dalla cartella assets/piper/voices/.'}
+        </Text>
+        {voices.length === 0 ? (
+          <View style={{ paddingVertical: 12, alignItems: 'center' }}>
+            <AlertCircle color={colors.textSecondary} size={16} />
+            <Text style={{ color: colors.textSecondary, fontSize: 12, marginTop: 6 }}>Nessuna voce trovata</Text>
+          </View>
+        ) : (
+          voices.map((v) => {
+            const selected = v.id === activeVoiceId;
+            return (
+              <TouchableOpacity
+                key={v.id}
+                testID={`voice-${v.id}`}
+                onPress={() => switchVoice(v.id)}
+                disabled={voiceSwitching}
+                style={[
+                  styles.voiceRow,
+                  {
+                    borderColor: selected ? colors.primaryActive : colors.border,
+                    backgroundColor: selected ? colors.primaryActive + '15' : colors.background,
+                    opacity: voiceSwitching && !selected ? 0.5 : 1,
+                  },
+                ]}
+              >
+                <View style={{ flex: 1 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Text style={{ fontSize: 20 }}>{v.flag || '🎤'}</Text>
+                    <Text style={{ color: colors.textPrimary, fontSize: 15, fontWeight: '700' }}>
+                      {v.name}
+                    </Text>
+                  </View>
+                  <Text style={{ color: colors.textSecondary, fontSize: 11, marginTop: 3 }}>
+                    {v.language} · {v.quality} · ~{v.size_mb} MB
+                  </Text>
+                  <Text style={{ color: colors.textSecondary, fontSize: 11, marginTop: 1, lineHeight: 14 }} numberOfLines={2}>
+                    {v.description}
+                  </Text>
+                </View>
+                <View style={{ width: 28, alignItems: 'center' }}>
+                  {selected && voiceSwitching ? (
+                    <ActivityIndicator size="small" color={colors.primaryActive} />
+                  ) : selected ? (
+                    <Check color={colors.primaryActive} size={20} />
+                  ) : (
+                    <Volume2 color={colors.textSecondary} size={18} />
+                  )}
+                </View>
+              </TouchableOpacity>
+            );
+          })
+        )}
+      </View>
+
       <Text style={[styles.section, { color: colors.textSecondary }]}>MOTORE TTS</Text>
       <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
         <View style={styles.row}>
@@ -194,7 +283,7 @@ export default function SettingsScreen() {
             </Text>
             <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>
               {piperReady
-                ? 'Inferenza locale tramite sherpa-onnx + beppe.onnx. Nessun server, nessuna connessione richiesta.'
+                ? 'Inferenza locale tramite Microsoft ONNX Runtime + voce Piper selezionata. Nessun server, nessuna connessione richiesta.'
                 : piperError
                   ? `Errore inizializzazione (${piperStep}): ${piperError}`
                   : engine === 'unknown'
@@ -252,7 +341,7 @@ export default function SettingsScreen() {
       <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
         <View style={{ paddingVertical: 12 }}>
           <Text style={[styles.rowMeta, { color: colors.textSecondary, marginBottom: 8 }]}>
-            Log persistente del motore TTS. Sopravvive ai crash. Apri qui dopo che l'app si chiude e copia il contenuto.
+            Log persistente del motore TTS. Sopravvive ai crash. Apri qui dopo che l&apos;app si chiude e copia il contenuto.
           </Text>
 
           {/* ─── Verifica integrità file (colored indicators) ─── */}
@@ -370,7 +459,7 @@ export default function SettingsScreen() {
       </View>
 
       <Text style={[styles.footer, { color: colors.textSecondary }]}>
-        Beppe Audiobooks · v1.0 · Powered by Piper TTS (sherpa-onnx)
+        Beppe Audiobooks · v2.0 · Powered by Piper TTS (Microsoft ONNX Runtime + espeak-ng)
       </Text>
     </ScrollView>
   );
@@ -406,4 +495,15 @@ const styles = StyleSheet.create({
   },
   langFlag: { fontSize: 20 },
   langSigla: { fontSize: 13, fontWeight: '700', letterSpacing: 0.5 },
+  // Voice picker
+  voiceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 14,
+    borderWidth: 1.2,
+    marginBottom: 8,
+    gap: 12,
+  },
 });

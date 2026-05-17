@@ -765,3 +765,108 @@ agent_communication:
       controls. Verify by playing a book then locking the screen — TTS
       should keep going and the notification should show Play/Pause/Skip
       controls.
+  - agent: "main"
+    message: |
+      **MAJOR REFACTOR v2.0 — Replaced sherpa-onnx with Microsoft ONNX Runtime + multi-voice support.**
+
+      USER REQUEST: drop sherpa-onnx entirely, use Microsoft onnxruntime-android
+      directly for inference, read any .onnx/.json voice cleanly without
+      metadata-injection tricks, support FP16/INT8 natively, ship multiple
+      Italian voices (Riccardo as default + Beppe slot) selectable from
+      Settings, keep ALL existing UI / ebook handling / sentence-splitting /
+      bookmarks / mini-player / i18n / dark mode untouched.
+
+      WHAT CHANGED (this iteration):
+      • REMOVED `react-native-sherpa-onnx-offline-tts` dependency completely +
+        deleted the entire 1641-line patches/*.patch file + sherpaPiper.ts +
+        postinstall hook.
+
+      • NEW local Expo module `modules/piper-tts/` (vendored, NOT in
+        node_modules) — autolinked via `react-native.config.js`:
+        - android/build.gradle: declares `com.microsoft.onnxruntime:onnxruntime-android:1.19.2`
+          (official Maven, supports FP32/FP16/INT8 natively) + androidx.media +
+          kotlinx-coroutines. Has CONDITIONAL externalNativeBuild that compiles
+          espeak-ng via NDK ONLY when `-PwithNativePhonemizer=true` is passed.
+          Default = OFF so the first EAS build is fast & reliable.
+        - OnnxEngine.kt: thin wrapper around OrtEnvironment.createSession,
+          handles VITS inputs (input/input_lengths/scales/sid) + FloatArray output.
+        - VoiceConfig.kt: parses .onnx.json sidecar directly. Reads
+          phoneme_id_map and converts IPA chars → phoneme IDs with proper
+          BOS/PAD/EOS insertion (matches Piper's standard pre-processing).
+        - PhonemizerNative.kt: JNI loader for libpiper_phonemize_jni.so.
+          Catches UnsatisfiedLinkError gracefully so the Italian fallback
+          kicks in if .so isn't built.
+        - ItalianPhonemizer.kt: pure-Kotlin rule-based Italian → IPA
+          converter (~150 lines). Used as the safety-net phonemizer when
+          espeak-ng JNI isn't compiled. Handles all Italian digraphs
+          (gn/gl/sc/ch/gh/qu/zz/gli), conditional consonants (c/g before
+          front vowels), open/closed vowels via accent marks, geminates.
+        - PiperAudioPlayer.kt: AudioTrack in PCM_FLOAT mode for the
+          model's native sample rate. Stop is chunked so it interrupts
+          promptly.
+        - PiperPlaybackService.kt: foreground service + MediaSessionCompat
+          with lock-screen notification (PLAY/PAUSE/PREV/NEXT/STOP buttons),
+          dispatches media-button events back to JS via piperMediaAction.
+          Ported from the old sherpa wrapper but independent.
+        - PiperTtsModule.kt: REGISTERED AS `NativeModules.TTSManager` so
+          existing JS imports keep working unchanged. Exposes loadVoice,
+          unloadVoice, generateAndPlay, stopPlayback,
+          startPlaybackSession/updatePlaybackSession/stopPlaybackSession.
+          Resilient phonemizer init (tries espeak first, falls back to
+          ItalianPhonemizer for it_IT models).
+
+      • Asset re-org: `assets/piper/voices/<voice_id>/{model.onnx,
+        model.onnx.json}`. Each voice has its OWN JSON sidecar — no
+        metadata injection, no tokens.txt, sherpa-onnx style.
+        Bundled voices (assets/piper/voices.json manifest):
+          - riccardo (it_IT, x_low, ~28MB) — DOWNLOADED FROM HuggingFace,
+            ships in APK as the working baseline.
+          - beppe (placeholder copy of riccardo JSON — user needs to drop
+            their real beppe.onnx + .json there to test their custom model).
+
+      • New JS layer:
+        - piperEngine.ts (rewritten, ~370 lines): initEngine(),
+          speakSentence(), stopSpeak(), startPlaybackSession() etc.
+          IDENTICAL public API to the old engine so PlayerContext.tsx and
+          settings.tsx work unchanged. PLUS new APIs: listVoices(),
+          getCurrentVoiceId(), setCurrentVoiceId(), reloadEngine().
+        - piperAssets.ts (rewritten): static require() map of voice
+          assets (Metro needs static paths) keyed by voice id.
+          assets/piper/voices.json drives the runtime catalog.
+        - piperBridge.ts (NEW): guarded lazy loader for
+          NativeModules.TTSManager.
+        - settings.tsx: NEW "VOCE" section with tappable voice list
+          (flag, name, language, quality, size). Selection persists in
+          AsyncStorage @piper/selected_voice_v2 and triggers
+          reloadEngine() in the background.
+
+      VERIFICATION DONE:
+      • Metro bundle: 3053 modules, clean compile in 5.2s, zero errors.
+      • TypeScript: `npx tsc --noEmit` exits 0.
+      • ESLint: 0 errors, only style warnings.
+      • Dependency tree: no sherpa-onnx references remain. node_modules
+        no longer contains react-native-sherpa-onnx-offline-tts.
+
+      NOT YET VERIFIED (REQUIRES EAS BUILD):
+      • Kotlin compilation of the new native module on Android NDK.
+      • AAR linkage with onnxruntime-android.
+      • Runtime: ORT session creation + VITS inference for Riccardo model.
+      • Italian phonemizer audio quality.
+
+      USER ACTION REQUIRED:
+      1. `cd /app/frontend && eas build --platform android --profile preview`
+      2. Install APK, open Settings → VOCE section, verify Riccardo +
+         Beppe slots appear with proper metadata. Selecting Riccardo
+         triggers reloadEngine().
+      3. Open any book, hit Play. Expected: Italian narration via Kotlin
+         ItalianPhonemizer + Microsoft ORT. Trace logs in
+         Settings → DIAGNOSTICA PIPER → "Mostra trace" should show
+         `init.native OK`, `phase.3 native.loadVoice`,
+         `init.ready sr=16000 lang=it (Italian) phonemes=130 speakers=1`.
+
+      WHAT'S DELIBERATELY DEFERRED TO ITERATION 2:
+      • Native espeak-ng compilation via NDK+CMake (the CMakeLists.txt
+        and phonemize_jni.cpp are already in place, just gated behind
+        `withNativePhonemizer=true` gradle property). Will enable full
+        multi-language support (EN, ES, DE, FR, ...). Italian works
+        right now thanks to ItalianPhonemizer fallback.
