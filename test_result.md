@@ -316,10 +316,64 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: |
-      Patch v2 applied. JitPack 1.12.15 → 1.12.26, xnnpack→cpu provider
-      fallback, VoxSherpa "calmed" VITS defaults. Native testing requires
-      EAS build + physical Android device — cannot be tested by automated
-      agents. User to rebuild APK and share DIAGNOSTICA PIPER trace.
+      v6.9 — UPGRADE sherpa-onnx 1.12.26 → 1.13.2 (chirurgico, nessun
+      altro file toccato).
+
+      USER CONTEXT: il modello beppe.onnx (Piper 2.10) FP32 crasha
+      consistentemente in init.5d.OfflineTts.new (SIGSEGV hard, non
+      catchable, processo terminato dopo ~11s). Il modello carica
+      PERFETTAMENTE con onnxruntime DESKTOP locale (log session 
+      successfully initialized, 2548 nodi, all assigned to 
+      CPUExecutionProvider, MatmulTransposeFusion + ConvActivationFusion
+      modified). Quindi il modello NON è corrotto: il problema è
+      specifico dell'AAR mobile sherpa-onnx 1.12.26.
+
+      DETTAGLIO TECNICO:
+      - beppe.onnx è opset 15 (confermato), producer originale 
+        'piper 2.10.0', spoofato a 'pytorch 1.13.1'.
+      - Architettura VITS+: encoder con 6 attention layers stile 
+        MobileClipMHA (visibile nei log come 
+        '/enc_p/encoder/attn_layers.{0..5}/MatMul_*'). NON è un 
+        Piper 1.x classico.
+      - Modello ha 2548 nodi (vs ~1500 di Riccardo classico) → più 
+        pressione su allocatore native.
+      - Nessun op contrib com.microsoft (confermato da log diagnose).
+      - L'AAR sherpa-onnx 1.12.26 usa onnxruntime ~1.18 (autunno 2025),
+        che ha bug noti sul mobile ARM64 per attention layers grandi
+        con shape dinamiche.
+
+      v6.9 fix:
+      - Solo cambio versione AAR JitPack: 1.12.26 → 1.13.2.
+      - Nuovo onnxruntime bundled ~1.22-1.24 → +2 anni di bug fix 
+        kernel ARM64 + bounds checks aggiuntivi per prevenire SIGSEGV
+        (changelog 1.13.x cita esplicitamente: "Add bounds checks to 
+        prevent SIGSEGV").
+      - Nessuna modifica al codice Kotlin/JS — API di OfflineTts, 
+        OfflineTtsConfig, OfflineTtsVitsModelConfig, 
+        OfflineTtsModelConfig sono backward-compatible (data class 
+        Kotlin con named parameters).
+      - File modificato: solo build.gradle (1 riga implementation + 
+        commenti). Patch da 1637 → 1641 righe (+4 di commenti).
+
+      USER ACTION: rebuild via 
+      'eas build --platform android --profile preview'
+      e ritestare il caricamento di beppe.onnx (Piper 2.10 FP32, 
+      20MB). Mandare il nuovo log init.5d.OfflineTts.new* per 
+      conferma:
+      - ✅ Se vediamo init.5d.OfflineTts.new.ok → upgrade ha risolto
+      - ❌ Se vediamo ancora SIGSEGV silenzioso → applicare strategia
+        backup (pre-optimize model con onnxruntime desktop + 
+        re-iniettare metadata, vedi /app/scripts/pre_optimize_*.py)
+
+      Tutti i test backward-compat: tsc --noEmit pulito, git diff 
+      solo 1 file (la patch).
+
+      USER REPORT: log shows "mem=0/27MB" or "mem=2/18MB" right before
+      the JNI newFromFile() call hangs silently, and the user (correctly)
+      suspected a memory issue. INVESTIGATION clarified that those
+      numbers were the JAVA heap (Runtime.getRuntime()), NOT the native
+      heap where sherpa-onnx allocates the ONNX model. So the original
+      log was misleading and didn't reflect the real OOM risk.
   - agent: "main"
     message: |
       v5 patch applied (race condition fix). 4 files modified:

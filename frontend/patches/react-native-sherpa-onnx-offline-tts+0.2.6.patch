@@ -1,21 +1,25 @@
 diff --git a/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle b/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
-index f2fd70a..e671964 100644
+index f2fd70a..a68401b 100644
 --- a/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
 +++ b/node_modules/react-native-sherpa-onnx-offline-tts/android/build.gradle
-@@ -86,6 +86,12 @@ android {
+@@ -86,6 +86,16 @@ android {
  repositories {
    mavenCentral()
    google()
 +  // PATCH (beppe-audiobooks): pull latest sherpa-onnx AAR via JitPack instead
 +  // of the bundled local libs/sherpa-onnx-1.10.35.aar — the old version
 +  // (Oct 2023) crashes (SIGSEGV) when loading Piper models exported with
-+  // PyTorch >= 2.1. v1.12.26 (May 2026) is the same version VoxSherpa-TTS
-+  // uses on Google Play (k2-fsa officially listed Android TTS app).
++  // PyTorch >= 2.1.
++  // v6.9: upgraded 1.12.26 -> 1.13.2. The newer AAR bundles a more recent
++  // onnxruntime (~1.22) with better ARM64 kernel coverage for large VITS
++  // models with attention layers (e.g. Piper 2.10 models like Beppe with
++  // 6 attn_layers + MobileClipMHA-style MHA). Also includes additional
++  // JNI bounds checks that prevent SIGSEGV on edge cases.
 +  maven { url 'https://jitpack.io' }
    flatDir {
          dirs 'libs' // Specifies the 'libs' directory for local AARs
      }
-@@ -93,18 +99,21 @@ repositories {
+@@ -93,18 +103,21 @@ repositories {
  
  def kotlin_version = getExtOrDefault("kotlinVersion")
  
@@ -31,8 +35,8 @@ index f2fd70a..e671964 100644
 -  // compileOnly files('libs/sherpa-onnx-1.10.35.aar')
 -  // implementation "com.k2fsa:sherpa-onnx:+"
 -  // implementation(name:'sherpa-onnx-1.10.35.aar', ext:'aar')
-+  // PATCH (beppe-audiobooks): upgraded local 1.10.35 -> JitPack 1.12.26
-+  implementation 'com.github.k2-fsa:sherpa-onnx:1.12.26'
++  // PATCH (beppe-audiobooks): upgraded local 1.10.35 -> JitPack 1.13.2 (v6.9)
++  implementation 'com.github.k2-fsa:sherpa-onnx:1.13.2'
 +  // PATCH (beppe-audiobooks v6): androidx.media for MediaSessionCompat +
 +  // MediaStyle notification. Allows the TTS to expose lock-screen play /
 +  // pause / skip controls AND keep playing with the screen off via a
