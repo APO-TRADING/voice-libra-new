@@ -11,6 +11,13 @@ const extra = ['onnx', 'zip', 'bin', 'txt'];
 config.resolver.assetExts = Array.from(new Set([...(config.resolver.assetExts || []), ...extra]));
 config.resolver.sourceExts = (config.resolver.sourceExts || []).filter((e) => !extra.includes(e));
 
+// Enable `require.context()` for the Piper voices auto-discovery in
+// src/audio/piperAssets.ts. This lets the user drop a new voice folder
+// in assets/piper/voices/ and have it picked up at the next rebuild
+// without editing any source file.
+config.transformer = config.transformer || {};
+config.transformer.unstable_allowRequireContext = true;
+
 // Stub `canvas` (Node native package required by pdfjs-dist for rendering).
 // We only need text extraction so an empty module is sufficient.
 config.resolver.extraNodeModules = {
