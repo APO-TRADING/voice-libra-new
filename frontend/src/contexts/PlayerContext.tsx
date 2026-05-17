@@ -20,6 +20,7 @@ import {
   startPlaybackSession,
   updatePlaybackSession,
   stopPlaybackSession,
+  tracePiper,
 } from '../audio/piperEngine';
 
 type State = {
@@ -109,6 +110,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       const target: any = emitter || DeviceEventEmitter;
       subAction = target.addListener('piperMediaAction', (e: { action: string }) => {
         if (!e?.action) return;
+        tracePiper('media.button', e.action);
         const c = ctrlRef.current;
         if (!c) return;
         if (e.action.endsWith('.PLAY')) c.play();
@@ -118,6 +120,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         else if (e.action.endsWith('.STOP')) c.pause();
       });
       subFocus = target.addListener('piperAudioFocus', (e: { focus: number }) => {
+        tracePiper('audio.focus', `focus=${e?.focus}`);
         // -1=AUDIOFOCUS_LOSS, -2=TRANSIENT, -3=CAN_DUCK, 1=GAIN
         const c = ctrlRef.current;
         if (!c) return;
@@ -229,7 +232,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   }, [queueSave, speakOne]);
 
   const play = useCallback(() => {
-    if (!sentencesRef.current.length) return;
+    if (!sentencesRef.current.length) {
+      tracePiper('play.noop', 'sentences empty');
+      return;
+    }
+    tracePiper('play.tap', `idx=${indexRef.current}/${sentencesRef.current.length} title="${titleRef.current.slice(0, 40)}"`);
     // PATCH (beppe-audiobooks v5): reset the consecutive-fail counter on
     // every fresh play() press so a new session always tries Piper first.
     piperFailCountRef.current = 0;
@@ -311,6 +318,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   }, [goTo]);
 
   const stop = useCallback(() => {
+    tracePiper('stop.tap', `book=${bookIdRef.current || 'none'}`);
     pause();
     setBookId(null);
     setTitle('');
@@ -326,6 +334,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   }, [pause]);
 
   const load = useCallback(async (id: string) => {
+    tracePiper('load.start', `id=${id} prev=${bookIdRef.current || 'none'}`);
     // PATCH (beppe-audiobooks v6.4): if the user re-enters the player for
     // the book that is ALREADY playing (e.g. they tapped the mini-player
     // or the library card while the book is being read), do NOT reset the
@@ -333,24 +342,31 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     // stop the TTS mid-sentence and lose context. Just return — the live
     // state (sentences, index, isPlaying, etc.) is already in the context.
     if (bookIdRef.current === id) {
+      tracePiper('load.skip', 'same book already loaded');
       return;
     }
     pause();
-    const book: BookFull = await api.getBook(id);
-    setBookId(book.id);
-    setTitle(book.title);
-    setAuthor(book.author || null);
-    setCoverUrl(book.cover_url || null);
-    setSentences(book.sentences || []);
-    const startIdx = Math.max(0, Math.min(book.current_sentence_index || 0, (book.sentences?.length || 1) - 1));
-    setIndex(startIdx);
-    indexRef.current = startIdx;
-    setLengthScale(book.length_scale || 1.0);
-    lengthScaleRef.current = book.length_scale || 1.0;
-    // Sync refs so the next play() picks up the freshly-loaded metadata.
-    titleRef.current = book.title;
-    authorRef.current = book.author || null;
-    coverUrlRef.current = book.cover_url || null;
+    try {
+      const book: BookFull = await api.getBook(id);
+      setBookId(book.id);
+      setTitle(book.title);
+      setAuthor(book.author || null);
+      setCoverUrl(book.cover_url || null);
+      setSentences(book.sentences || []);
+      const startIdx = Math.max(0, Math.min(book.current_sentence_index || 0, (book.sentences?.length || 1) - 1));
+      setIndex(startIdx);
+      indexRef.current = startIdx;
+      setLengthScale(book.length_scale || 1.0);
+      lengthScaleRef.current = book.length_scale || 1.0;
+      // Sync refs so the next play() picks up the freshly-loaded metadata.
+      titleRef.current = book.title;
+      authorRef.current = book.author || null;
+      coverUrlRef.current = book.cover_url || null;
+      tracePiper('load.ok', `title="${book.title.slice(0, 40)}" sentences=${book.sentences?.length || 0} startIdx=${startIdx}`);
+    } catch (e: any) {
+      tracePiper('load.err', String(e?.message || e));
+      throw e;
+    }
   }, [pause]);
 
   const updateLengthScale = useCallback((v: number) => {

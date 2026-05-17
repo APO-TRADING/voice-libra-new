@@ -9,8 +9,14 @@ import 'react-native-url-polyfill/auto';
 
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { useEffect } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+// Importing piperEngine at the ROOT layout triggers its module-level
+// bootstrap (global error handler + ==SESSION.START== trace line) BEFORE
+// any other screen mounts. This way the persistent trace captures every
+// app launch even if the user never reaches Settings.
+import { tracePiper } from '../src/audio/piperEngine';
 import { ThemeProvider, useTheme } from '../src/contexts/ThemeContext';
 import { PlayerProvider } from '../src/contexts/PlayerContext';
 import { I18nProvider, useT } from '../src/i18n';
@@ -18,6 +24,9 @@ import { I18nProvider, useT } from '../src/i18n';
 function StackInner() {
   const { mode, colors } = useTheme();
   const t = useT();
+  useEffect(() => {
+    tracePiper('app.stackMounted', `theme=${mode}`);
+  }, [mode]);
   return (
     <>
       <StatusBar style={mode === 'dark' ? 'light' : 'dark'} />
@@ -38,6 +47,9 @@ function StackInner() {
 }
 
 export default function RootLayout() {
+  useEffect(() => {
+    tracePiper('app.rootMounted', 'GestureHandlerRoot + SafeArea ready');
+  }, []);
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>

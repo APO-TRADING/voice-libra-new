@@ -35,11 +35,19 @@ export default function SettingsScreen() {
   const [voices] = useState<VoiceMeta[]>(() => listVoices());
   const [activeVoiceId, setActiveVoiceId] = useState<string>(voices[0]?.id ?? 'riccardo');
   const [voiceSwitching, setVoiceSwitching] = useState(false);
+  const [testRunning, setTestRunning] = useState(false);
+
+  const activeVoiceMeta = voices.find((v) => v.id === activeVoiceId) || null;
 
   useEffect(() => {
     (async () => {
       try { setActiveVoiceId(await getCurrentVoiceId()); } catch { /* ignore */ }
     })();
+  }, []);
+
+  const refreshTrace = useCallback(async () => {
+    const t = await readPiperTrace();
+    setTrace(t || '(vuoto)');
   }, []);
 
   const switchVoice = useCallback(async (id: string) => {
@@ -54,13 +62,33 @@ export default function SettingsScreen() {
       Alert.alert('Cambio voce fallito', String(e?.message || e));
     } finally {
       setVoiceSwitching(false);
+      refreshTrace();
     }
-  }, [activeVoiceId, voiceSwitching]);
+  }, [activeVoiceId, voiceSwitching, refreshTrace]);
 
-  const refreshTrace = useCallback(async () => {
-    const t = await readPiperTrace();
-    setTrace(t || '(vuoto)');
-  }, []);
+  const testCurrentVoice = useCallback(async () => {
+    if (testRunning) return;
+    setTestRunning(true);
+    try {
+      if (!isPiperReady()) {
+        const ok = await initEngine();
+        if (!ok) {
+          Alert.alert('Motore non pronto',
+            'Il motore TTS non si è inizializzato. Controlla DIAGNOSTICA PIPER più sotto per i dettagli.');
+          return;
+        }
+      }
+      // Demo sentence with the SELECTED voice. Slightly longer than just
+      // "Ciao" so cadence and prosody are audible, not only the wake word.
+      const phrase = `Ciao, sono ${activeVoiceMeta?.name || 'la voce selezionata'}. Sto leggendo un audiolibro per te.`;
+      await speakSentence(phrase, 1.0);
+    } catch (e: any) {
+      Alert.alert('Test fallito', String(e?.message || e));
+    } finally {
+      setTestRunning(false);
+      refreshTrace();
+    }
+  }, [testRunning, activeVoiceMeta, refreshTrace]);
 
   useEffect(() => { refreshTrace(); }, [refreshTrace]);
 
@@ -269,6 +297,34 @@ export default function SettingsScreen() {
             );
           })
         )}
+
+        {/* ── Test voce — speak a short Italian sentence with the
+              currently selected voice. Stays here in the VOCE section
+              (instead of the diagnostics block) so the connection between
+              "selected voice" and "test it" is visually obvious. ── */}
+        {voices.length > 0 && (
+          <TouchableOpacity
+            testID="test-voice-button"
+            onPress={testCurrentVoice}
+            disabled={voiceSwitching || testRunning}
+            style={[
+              styles.testVoiceBtn,
+              {
+                backgroundColor: colors.primaryActive,
+                opacity: (voiceSwitching || testRunning) ? 0.6 : 1,
+              },
+            ]}
+          >
+            {testRunning ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Mic color="#fff" size={16} />
+            )}
+            <Text style={styles.testVoiceLabel}>
+              {testRunning ? 'Sintesi in corso…' : `Prova "${activeVoiceMeta?.name || activeVoiceId}"`}
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       <Text style={[styles.section, { color: colors.textSecondary }]}>MOTORE TTS</Text>
@@ -423,26 +479,6 @@ export default function SettingsScreen() {
             >
               <Text style={[styles.toggleLabel, { color: colors.textPrimary }]}>Reset</Text>
             </TouchableOpacity>
-            <TouchableOpacity
-              onPress={async () => {
-                try {
-                  if (!isPiperReady()) {
-                    Alert.alert('Inizializzazione Piper', 'Attendi 10-30 sec per la prima setup...');
-                    await initEngine();
-                  }
-                  await speakSentence('Ciao.', 1.0);
-                  Alert.alert('Test OK', 'La voce ha letto "Ciao" correttamente.');
-                } catch (e: any) {
-                  Alert.alert('Test fallito', String(e?.message || e));
-                } finally {
-                  refreshTrace();
-                }
-              }}
-              style={[styles.toggleBtn, { borderColor: colors.primaryActive, paddingHorizontal: 12, flexDirection: 'row', gap: 6 }]}
-            >
-              <Mic color={colors.primaryActive} size={14} />
-              <Text style={[styles.toggleLabel, { color: colors.primaryActive }]}>Test voce</Text>
-            </TouchableOpacity>
           </View>
           <Text style={[styles.rowMeta, { color: colors.textSecondary, marginBottom: 6 }]}>
             Trace dettagliato (JS + nativo). Le righe `[native]` e `[audio]` vengono dal Kotlin JNI.
@@ -506,4 +542,14 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     gap: 12,
   },
+  testVoiceBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    height: 48,
+    borderRadius: 14,
+    marginTop: 8,
+  },
+  testVoiceLabel: { color: '#fff', fontSize: 15, fontWeight: '700' },
 });
