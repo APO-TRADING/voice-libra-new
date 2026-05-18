@@ -1,7 +1,6 @@
-// audiobookPlayer.web.ts — Web stub. Metro resolves this file when
-// bundling for the web target so we don't even try to load
-// react-native-track-player (which is native-only). All exports are
-// no-ops; native flow happens only on Android / iOS.
+// audiobookPlayer.web.ts — Web stub.
+// Metro resolves this file when bundling for web. We don't load
+// expo-audio on web; the player is no-op.
 
 export type SentenceMetadata = {
   bookTitle: string;
@@ -12,18 +11,12 @@ export type SentenceMetadata = {
 
 type Sub = { remove: () => void };
 
-export async function ensureTrackPlayerSetup(): Promise<void> { /* noop */ }
-export async function enqueueSentence(_wavPath: string, _meta: SentenceMetadata): Promise<string> { return ''; }
-export async function tpPlay(): Promise<void> { /* noop */ }
-export async function tpPause(): Promise<void> { /* noop */ }
-export async function tpStop(): Promise<void> { /* noop */ }
-export async function tpIsPlaying(): Promise<boolean> { return false; }
-export async function tpGetQueueSize(): Promise<number> { return 0; }
-export function onTrackChanged(_cb: (info: { lastTrackId?: string; nextTrackId?: string }) => void): Sub { return { remove: () => {} }; }
-export function onPlaybackState(_cb: (state: any) => void): Sub { return { remove: () => {} }; }
-export function onQueueEnded(_cb: () => void): Sub { return { remove: () => {} }; }
+export async function playWav(_wavPath: string, _meta: SentenceMetadata): Promise<void> { /* noop */ }
+export async function pausePlayback(): Promise<void> { /* noop */ }
+export async function resumePlayback(): Promise<void> { /* noop */ }
+export async function stopPlayback(): Promise<void> { /* noop */ }
+export async function releasePlayer(): Promise<void> { /* noop */ }
+export function onState(_cb: (s: 'playing' | 'paused' | 'finished' | 'idle') => void): Sub { return { remove: () => {} }; }
 export function onRemotePlay(_cb: () => void): Sub { return { remove: () => {} }; }
 export function onRemotePause(_cb: () => void): Sub { return { remove: () => {} }; }
-export function onRemoteStop(_cb: () => void): Sub { return { remove: () => {} }; }
-export function onPlaybackError(_cb: (err: { code: string; message: string }) => void): Sub { return { remove: () => {} }; }
-export function getStateEnum(): any { return undefined; }
+export function isCurrentlyPlaying(): boolean { return false; }

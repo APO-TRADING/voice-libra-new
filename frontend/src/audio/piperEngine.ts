@@ -456,17 +456,14 @@ export function isPiperReady(): boolean {
 }
 
 // =========================================================================
-// SPEECH API (TrackPlayer-backed)
+// SPEECH API (expo-audio-backed)
 // =========================================================================
 
 import {
-  ensureTrackPlayerSetup,
-  enqueueSentence as tpEnqueue,
-  tpPlay,
-  tpPause as tpPauseFn,
-  tpStop,
-  onQueueEnded,
-  onTrackChanged,
+  playWav,
+  pausePlayback,
+  resumePlayback,
+  stopPlayback,
   type SentenceMetadata,
 } from './audiobookPlayer';
 
@@ -480,12 +477,14 @@ function sanitizeForPiper(raw: string): string {
 }
 
 /**
- * Synthesize ONE sentence and play it via react-native-track-player.
+ * Synthesize ONE sentence and play it via expo-audio.
  *
- * Resolves when the track finishes playing naturally (track-ended event),
- * or rejects when the user hard-stops via lockscreen / app stop button.
- * On pause-from-lockscreen the promise keeps awaiting \u2014 the track is
- * paused, not aborted; resume continues the same track to completion.
+ * Resolves when the clip finishes playing naturally (didJustFinish event)
+ * or when the audio is hard-stopped via stopSpeak(). On pause-from-
+ * lockscreen the underlying expo-audio player just pauses; resume
+ * continues the same clip to completion. The Promise stays unresolved
+ * the whole time the audio is paused, which is what we want — the
+ * playLoop in PlayerContext waits on us, and won't auto-advance.
  *
  * @param text         the raw sentence text to read
  * @param lengthScale  Piper length_scale; speed = 1 / lengthScale
@@ -507,79 +506,58 @@ export async function speakSentence(
     await trace('speak.skip', 'empty after sanitize');
     return;
   }
+  let wavPath: string | null = null;
   try {
     await trace('speak.synth', `len=${clean.length} speed=${speed.toFixed(2)}`);
     // 1. Synthesize to WAV on disk.
     const result = await native.synthesizeToFile(clean, 0, speed);
+    wavPath = result.path;
     await trace('speak.wav', `${result.path.split('/').pop()} ${Math.round(result.durationMs)}ms (synth=${Math.round(result.synthMs)}ms)`);
 
-    // 2. Reset queue + enqueue this single track.
-    //    Resetting before adding ensures we don't accumulate stale tracks
-    //    from previously interrupted sentences. PlayerContext.play() loop
-    //    awaits one sentence at a time, so a fresh queue is the right model.
-    await ensureTrackPlayerSetup();
-    await tpStop();
-    const trackId = await tpEnqueue(result.path, {
+    // 2. Hand off to expo-audio. playWav() resolves when the clip ends
+    //    naturally (didJustFinish) or when stopPlayback() is called.
+    const sentenceMeta: SentenceMetadata = {
       bookTitle: meta?.bookTitle || 'Audiobook',
       bookAuthor: meta?.bookAuthor || 'Beppe Audiobooks',
       voiceName: meta?.voiceName || currentVoiceMeta?.name || currentVoiceId,
       coverUrl: meta?.coverUrl || null,
-    });
-    await trace('speak.enqueue', `id=${trackId}`);
+    };
 
-    // 3. Play and wait for completion.
-    await tpPlay();
-
-    await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      const sub1 = onQueueEnded(() => {
-        if (settled) return;
-        settled = true;
-        try { sub1.remove(); sub2.remove(); } catch { /* ignore */ }
-        // Delete the WAV file \u2014 we don't need it anymore.
-        native.deleteWavFile(result.path).catch(() => {});
-        resolve();
-      });
-      const sub2 = onTrackChanged((info) => {
-        // The track was REMOVED before it could end naturally (user stopped,
-        // queue was reset). Treat as completion of THIS speakSentence call,
-        // but the caller (PlayerContext) will see playingRef==false and
-        // won't advance to the next sentence.
-        if (info.lastTrackId === trackId && !info.nextTrackId) {
-          if (settled) return;
-          settled = true;
-          try { sub1.remove(); sub2.remove(); } catch { /* ignore */ }
-          native.deleteWavFile(result.path).catch(() => {});
-          resolve();
-        }
-      });
-      // Hard safety timeout: if neither event fires within 5\u00d7 expected
-      // playback duration, bail out so the caller's loop never hangs.
-      const safetyMs = Math.max(15_000, result.durationMs * 5);
-      setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        try { sub1.remove(); sub2.remove(); } catch { /* ignore */ }
-        native.deleteWavFile(result.path).catch(() => {});
-        trace('speak.timeout', `${safetyMs}ms elapsed without queue-end event`).catch(() => {});
+    // Safety race: if neither finish nor stop fires within 5x expected
+    // duration, bail out so the caller's loop never hangs.
+    const safetyMs = Math.max(15_000, result.durationMs * 5);
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const safety = new Promise<void>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        trace('speak.timeout', `${safetyMs}ms elapsed without finish/stop event`).catch(() => {});
         reject(new Error(`Playback timeout after ${safetyMs}ms`));
       }, safetyMs);
     });
 
+    try {
+      await Promise.race([playWav(wavPath, sentenceMeta), safety]);
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+
+    // Clean up the WAV file — we don't need it anymore.
+    if (wavPath) native.deleteWavFile(wavPath).catch(() => {});
+
     await trace('speak.end', 'OK');
   } catch (e: any) {
     await trace('speak.error', `${e?.message || String(e)}`);
+    if (wavPath) native.deleteWavFile(wavPath).catch(() => {});
     throw e;
   }
 }
 
-/** Hard stop \u2014 cancels in-flight synthesis AND clears the TrackPlayer queue. */
+/** Hard stop — cancels in-flight synthesis AND tears down the audio session. */
 export async function stopSpeak(): Promise<void> {
   const native = getPiperNative();
   try {
-    await trace('stop.call', 'native.stopPlayback + TrackPlayer.reset');
+    await trace('stop.call', 'native.stopPlayback + expo-audio.stop');
     if (native) await native.stopPlayback().catch(() => {});
-    await tpStop();
+    await stopPlayback();
     if (native) await native.cleanupWavCache().catch(() => {});
     await trace('stop.call', 'OK');
   } catch (e: any) {
@@ -587,13 +565,23 @@ export async function stopSpeak(): Promise<void> {
   }
 }
 
-/** Soft pause via TrackPlayer \u2014 keeps queue intact so resume continues. */
+/** Soft pause via expo-audio — keeps current sentence loaded so resume continues. */
 export async function pauseSpeak(): Promise<void> {
   try {
-    await trace('pause.call', 'TrackPlayer.pause');
-    await tpPauseFn();
+    await trace('pause.call', 'expo-audio.pause');
+    await pausePlayback();
   } catch (e: any) {
     await trace('pause.call.err', `${e?.message || e}`);
+  }
+}
+
+/** Soft resume via expo-audio — continues the current sentence from where it was. */
+export async function resumeSpeak(): Promise<void> {
+  try {
+    await trace('resume.call', 'expo-audio.resume');
+    await resumePlayback();
+  } catch (e: any) {
+    await trace('resume.call.err', `${e?.message || e}`);
   }
 }
 

@@ -6,11 +6,11 @@
 // Pre-buffering: while a sentence is being spoken, the next-sentence
 // synthesis is initiated immediately so playback feels seamless.
 //
-// Lockscreen / background audio: react-native-track-player owns the
-// notification + lockscreen + media-buttons UI. We subscribe to its
-// remote-control events so an OS-level Play/Pause/Stop tap is reflected
-// in our React state and routes back through the same play() / pause() /
-// stop() actions the on-screen UI triggers.
+// Lockscreen / background audio: expo-audio owns the lockscreen +
+// notification + media-buttons UI via setActiveForLockScreen. We
+// subscribe to its playbackStatusUpdate stream so an OS-level Play/Pause
+// tap is reflected in our React state and routes back through the same
+// play() / pause() actions the on-screen UI triggers.
 //
 // Singleton: any new play() call hard-stops the previous one before starting.
 import * as Speech from 'expo-speech';
@@ -25,12 +25,8 @@ import {
   tracePiper,
 } from '../audio/piperEngine';
 import {
-  onPlaybackState,
   onRemotePause,
   onRemotePlay,
-  onRemoteStop,
-  onPlaybackError,
-  getStateEnum,
 } from '../audio/audiobookPlayer';
 
 type State = {
@@ -101,57 +97,31 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { authorRef.current = author; }, [author]);
   useEffect(() => { coverUrlRef.current = coverUrl; }, [coverUrl]);
 
-  // PATCH (beppe-audiobooks v7): lockscreen / notification remote-control
-  // events from react-native-track-player.
-  //   - Event.RemotePause  -> mirror to pause() so the on-screen UI updates
-  //     and the playback loop stops (the headless service already paused
-  //     the underlying track).
-  //   - Event.RemotePlay   -> mirror to play(), resuming from indexRef.
-  //   - Event.RemoteStop   -> fully stop the audiobook (clears queue,
-  //     blanks state). The headless service has already reset the queue;
-  //     we just propagate the state change to React.
-  //   - Event.PlaybackState -> visual-only sync for isPlaying (in case
-  //     the user tapped pause from the notification without removing the
-  //     track). We do NOT touch playingRef here, so the playLoop keeps
-  //     awaiting onQueueEnded and resumes when the user taps play again.
+  // PATCH (beppe-audiobooks v8): lockscreen / notification remote-control
+  // events from expo-audio. Lock-screen shows Play/Pause buttons; tapping
+  // them invokes player.play()/pause() directly on the active player,
+  // which we observe via the player's playbackStatusUpdate stream — see
+  // audiobookPlayer.ts where we forward `playing/paused` deltas as
+  // onRemotePlay/onRemotePause callbacks. We mirror those into our
+  // play()/pause() handlers so the on-screen state stays in sync.
   // Use a ref to break the (otherwise circular) dependency cycle with
-  // play() / pause() / stop().
-  const ctrlRef = useRef<{ play: () => void; pause: () => void; stop: () => void } | null>(null);
+  // play() / pause().
+  const ctrlRef = useRef<{ play: () => void; pause: () => void } | null>(null);
 
   useEffect(() => {
     const subPlay = onRemotePlay(() => {
       tracePiper('remote.play', 'lockscreen tap');
-      ctrlRef.current?.play();
+      // Only react if the user wasn't already playing — avoids feedback
+      // loops where our own player.play() bounces back as a remote event.
+      if (!playingRef.current) ctrlRef.current?.play();
     });
     const subPause = onRemotePause(() => {
       tracePiper('remote.pause', 'lockscreen tap');
-      ctrlRef.current?.pause();
-    });
-    const subStop = onRemoteStop(() => {
-      tracePiper('remote.stop', 'lockscreen tap');
-      ctrlRef.current?.stop();
-    });
-    const subState = onPlaybackState((s: any) => {
-      const StateEnum = getStateEnum();
-      if (!StateEnum) return;
-      // Reflect transport state in the UI without disrupting the loop.
-      // (Pause/Stop from the loop itself flips playingRef BEFORE these
-      // events fire, so we don't trip on our own writes.)
-      if (s === StateEnum.Playing || s === StateEnum.Buffering) {
-        if (!isPlaying && playingRef.current) setIsPlaying(true);
-      } else if (s === StateEnum.Paused) {
-        if (isPlaying) setIsPlaying(false);
-      }
-    });
-    const subErr = onPlaybackError((e: { code: string; message: string }) => {
-      tracePiper('tp.playback.error', `${e.code}: ${e.message}`);
+      if (playingRef.current) ctrlRef.current?.pause();
     });
     return () => {
       try { subPlay.remove(); } catch { /* ignore */ }
       try { subPause.remove(); } catch { /* ignore */ }
-      try { subStop.remove(); } catch { /* ignore */ }
-      try { subState.remove(); } catch { /* ignore */ }
-      try { subErr.remove(); } catch { /* ignore */ }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -300,9 +270,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     playingRef.current = false;
     setIsPlaying(false);
     stopAll();
-    // TrackPlayer's own notification will flip to the "play" icon as soon
-    // as it receives the State.Paused transition triggered by stopAll() →
-    // tpStop() inside piperEngine. No extra work needed here.
+    // expo-audio updates the lockscreen widget automatically when the
+    // player transitions to paused / idle. No extra work needed here.
   }, [stopAll]);
 
   const toggle = useCallback(() => {
@@ -334,9 +303,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     setCoverUrl(null);
     setSentences([]);
     setIndex(0);
-    // TrackPlayer's queue was already reset inside stopAll() → tpStop(),
-    // and the foreground service tears itself down automatically when the
-    // queue is empty + the playback state is None.
+    // expo-audio's lockscreen widget tears itself down automatically when
+    // we call stopPlayback() (inside stopAll() → stopSpeak()).
   }, [pause]);
 
   const load = useCallback(async (id: string) => {
@@ -391,8 +359,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   // Keep ctrlRef in sync so the OS remote-control listeners (lockscreen /
   // notification) can dispatch back to the current handlers.
   useEffect(() => {
-    ctrlRef.current = { play, pause, stop };
-  }, [play, pause, stop]);
+    ctrlRef.current = { play, pause };
+  }, [play, pause]);
 
   const value = useMemo<Ctx>(() => ({
     bookId, title, author, coverUrl, sentences, index, isPlaying, lengthScale, engine, piperError, piperStep,

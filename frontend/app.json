@@ -72,7 +72,13 @@
           "backgroundColor": "#0A0A0C"
         }
       ],
-      "expo-localization"
+      "expo-localization",
+      [
+        "expo-audio",
+        {
+          "enableBackgroundPlayback": true
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
