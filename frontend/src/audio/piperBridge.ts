@@ -15,6 +15,10 @@ export type PiperNative = {
     numSymbols: number;
     espeakVoice: string;
     nativePhonemizer: boolean;
+    /** Base language code of the loaded phoneme dictionary, e.g. "it","en","es". */
+    phonemesDictLang?: string;
+    /** Number of word→IPA entries in the loaded dictionary (0 if none). */
+    phonemesDictSize?: number;
   }>;
   unloadVoice: () => Promise<unknown>;
   /**

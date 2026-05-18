@@ -152,15 +152,24 @@ export default function SettingsScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              // If the user is deleting the currently-active voice, fall back
-              // to the default bundled voice first.
-              if (activeVoiceId === voice.id) {
+              // CRITICAL ORDERING: if the user is deleting the currently
+              // active voice, we MUST tear down the native engine BEFORE
+              // removing the .onnx file. Otherwise Android keeps the file
+              // mapped in memory and our deleteAsync silently fails (or
+              // worse, the engine keeps reading freed inode blocks).
+              const isActive = activeVoiceId === voice.id;
+              if (isActive) {
                 const bundled = listVoices();
                 const fallback = bundled[0]?.id;
                 if (fallback) {
                   await setCurrentVoiceId(fallback);
                   setActiveVoiceId(fallback);
                 }
+                // Force the native module to close its OrtSession + free
+                // its handle on the model file. This is async and waits
+                // for the new voice to load (best-effort; we still proceed
+                // with the delete if reload fails for any reason).
+                await reloadEngine().catch(() => {});
               }
               await deleteDynamicVoice(voice.id);
               await refreshVoiceCatalog();

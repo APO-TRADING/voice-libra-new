@@ -108,12 +108,24 @@ export async function importVoice(): Promise<DynamicVoiceMeta | null> {
 
   const assets = result.assets;
 
-  // Case A: user picked a single .zip file
+  // Case A: user picked a single file
   if (assets.length === 1) {
     const a = assets[0];
     const nameLower = (a.name || '').toLowerCase();
     if (nameLower.endsWith('.zip')) {
       return await importFromZip(a.uri, a.name || 'voice.zip');
+    }
+    // BUG GUARD: tar/tar.gz/tgz are the formats Piper.exe and the Piper
+    // HuggingFace repo distribute models as. fflate doesn't support tar,
+    // so we give a specific, actionable error.
+    if (nameLower.endsWith('.tar.gz') || nameLower.endsWith('.tgz') || nameLower.endsWith('.tar')) {
+      throw new Error(
+        `Il formato .tar.gz non è supportato direttamente. ` +
+          `Soluzioni:\n` +
+          `  • Estrai l'archivio sul PC e ricomprimilo come .zip, oppure\n` +
+          `  • Estrai sul telefono (es. con "RAR" o "Files by Google") e ` +
+          `seleziona i file model.onnx + model.onnx.json insieme dal picker.`,
+      );
     }
     // Common error: user only picked the .onnx OR only the .json
     if (nameLower.endsWith('.onnx')) {
@@ -143,10 +155,12 @@ export async function importVoice(): Promise<DynamicVoiceMeta | null> {
 async function importFromFiles(
   assets: DocumentPicker.DocumentPickerAsset[],
 ): Promise<DynamicVoiceMeta> {
-  const onnxAsset = assets.find((a) => (a.name || '').toLowerCase().endsWith('.onnx'));
+  const onnxAsset = assets.find((a) => {
+    const n = (a.name || '').toLowerCase();
+    return n.endsWith('.onnx') && !n.endsWith('.onnx.json');
+  });
   const jsonAsset = assets.find(
-    (a) => (a.name || '').toLowerCase().endsWith('.onnx.json') ||
-           (a.name || '').toLowerCase().endsWith('.json'),
+    (a) => (a.name || '').toLowerCase().endsWith('.json'),
   );
   if (!onnxAsset || !jsonAsset) {
     throw new Error(
@@ -170,10 +184,18 @@ async function importFromFiles(
   const modelDest = `${voiceDir}/model.onnx`;
   const configDest = `${voiceDir}/model.onnx.json`;
 
+  // Defensive: if destination already exists (re-import of same id), delete
+  // first so copyAsync doesn't get tripped up by exotic provider URIs.
+  await safeDelete(modelDest);
+  await safeDelete(configDest);
+
   await FileSystem.copyAsync({ from: onnxAsset.uri, to: modelDest });
   await FileSystem.writeAsStringAsync(configDest, JSON.stringify(configJson));
 
-  return await registerVoice(voiceId, modelDest, configDest, configJson, onnxAsset.size || 0);
+  // Stat the just-copied file to get the ACTUAL byte count (the picker's
+  // a.size hint can be wrong or undefined for content:// URIs on Android).
+  const actualSize = await fileSize(modelDest);
+  return await registerVoice(voiceId, modelDest, configDest, configJson, actualSize || onnxAsset.size || 0);
 }
 
 async function importFromZip(zipUri: string, zipName: string): Promise<DynamicVoiceMeta> {
@@ -184,21 +206,36 @@ async function importFromZip(zipUri: string, zipName: string): Promise<DynamicVo
   // Read the zip as base64, then decode to bytes
   const b64 = await FileSystem.readAsStringAsync(zipUri, { encoding: FileSystem.EncodingType.Base64 });
   const bytes = new Uint8Array(Buffer.from(b64, 'base64'));
-  const entries = unzipSync(bytes);
+  let entries: Record<string, Uint8Array>;
+  try {
+    entries = unzipSync(bytes);
+  } catch (e: any) {
+    throw new Error(
+      `Archivio ZIP non valido o danneggiato: ${e?.message || e}. ` +
+        `Verifica che il file sia un .zip e non un .tar.gz/.rar.`,
+    );
+  }
 
-  // Find the .onnx and .onnx.json files inside (case-insensitive; ignore
-  // any subdirectories — flatten by basename).
+  // Find the .onnx and .onnx.json files inside (case-insensitive). We
+  // skip directory entries (zero-length) and walk subdirectories — Piper's
+  // tarballs typically nest model files under it_IT-paola-medium/.
   let onnxName: string | null = null;
   let jsonName: string | null = null;
   for (const name of Object.keys(entries)) {
     const lower = name.toLowerCase();
+    const entry = entries[name];
+    if (!entry || entry.length === 0) continue; // skip directory entries
     if (lower.endsWith('.onnx') && !lower.endsWith('.onnx.json') && !onnxName) onnxName = name;
-    else if ((lower.endsWith('.onnx.json') || lower.endsWith('.json')) && !jsonName) jsonName = name;
+    else if (lower.endsWith('.onnx.json') && !jsonName) jsonName = name;
+    else if (lower.endsWith('.json') && !jsonName && !lower.endsWith('.onnx.json')) {
+      // Fallback: plain .json sidecar (rare, but Piper's older releases used this)
+      jsonName = name;
+    }
   }
   if (!onnxName || !jsonName) {
     throw new Error(
       `Archivio ZIP "${zipName}" non contiene sia il file .onnx che il file .onnx.json. ` +
-        `Trovati: [${Object.keys(entries).join(', ')}]`,
+        `Trovati: [${Object.keys(entries).slice(0, 10).join(', ')}${Object.keys(entries).length > 10 ? '...' : ''}]`,
     );
   }
 
@@ -209,7 +246,10 @@ async function importFromZip(zipUri: string, zipName: string): Promise<DynamicVo
     throw new Error(`Modello troppo grande (${Math.round(onnxBytes.length / 1024 / 1024)} MB).`);
   }
 
-  const configRaw = new TextDecoder('utf-8').decode(jsonBytes);
+  // CROSS-PLATFORM utf8 decode: Buffer.from() is guaranteed to exist (we
+  // import the polyfill), TextDecoder is only available on Hermes ≥ 0.74
+  // and on web. Buffer route is the safe one for older runtimes.
+  const configRaw = Buffer.from(jsonBytes).toString('utf8');
   const configJson = parseAndValidateConfig(configRaw);
 
   const voiceId = generateVoiceId(zipName, configJson);
@@ -218,6 +258,10 @@ async function importFromZip(zipUri: string, zipName: string): Promise<DynamicVo
 
   const modelDest = `${voiceDir}/model.onnx`;
   const configDest = `${voiceDir}/model.onnx.json`;
+
+  // Defensive: clear stale files on re-import.
+  await safeDelete(modelDest);
+  await safeDelete(configDest);
 
   // Write the .onnx via base64 (no native binary write API in Expo)
   const onnxB64 = Buffer.from(onnxBytes).toString('base64');
@@ -297,6 +341,32 @@ async function ensureDir(path: string): Promise<void> {
   const info_ = await FileSystem.getInfoAsync(path);
   if (!info_.exists) {
     await FileSystem.makeDirectoryAsync(path, { intermediates: true });
+  }
+}
+
+/**
+ * Best-effort delete. Used to clear stale files on re-import without
+ * blowing up if they don't exist or are locked by another process.
+ */
+async function safeDelete(path: string): Promise<void> {
+  try {
+    await FileSystem.deleteAsync(path, { idempotent: true });
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Return the actual byte size of a file on disk (0 if missing). Used to
+ * report accurate sizes after import — the picker's `asset.size` hint is
+ * unreliable for content:// URIs on Android.
+ */
+async function fileSize(path: string): Promise<number> {
+  try {
+    const info_ = await FileSystem.getInfoAsync(path, { size: true } as any);
+    return (info_ as any).size || 0;
+  } catch {
+    return 0;
   }
 }
 
