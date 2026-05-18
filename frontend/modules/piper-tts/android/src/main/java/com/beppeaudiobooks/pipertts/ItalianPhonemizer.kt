@@ -278,6 +278,22 @@ object ItalianPhonemizer {
         c == 'c' && next == 'h' -> { ipa.append('k'); consumed = 2 }
         c == 'g' && next == 'h' -> { ipa.append(IPA_G); consumed = 2 }
         c == 'g' && next == 'n' -> { ipa.append(IPA_NJ); consumed = 2 }
+        // ---- GEMINATE PALATALIZATION ---------------------------------------
+        // "gg" + front vowel → /dːʒ/  (leggendo → ledʒːɛndo, oggi → ɔdʒːi)
+        // "cc" + front vowel → /tːʃ/  (accento → atːʃento, succede → sutːʃede)
+        // These MUST come before the single 'g'/'c' branches because:
+        //   1) The geminate produces a palatalized affricate, NOT a hard
+        //      /ɡː/ or /kː/ (which is what the single-consonant + geminate
+        //      logic would erroneously emit).
+        //   2) We consume both source chars (the "gg" / "cc") and emit
+        //      the IPA_LENGTH marker explicitly, so the post-digraph
+        //      geminate-detection block doesn't double-process.
+        c == 'g' && next == 'g' && isFrontVowel(next2) -> {
+          ipa.append('d'); ipa.append(IPA_ZH); ipa.append(IPA_LENGTH); consumed = 2
+        }
+        c == 'c' && next == 'c' && isFrontVowel(next2) -> {
+          ipa.append('t'); ipa.append(IPA_SH); ipa.append(IPA_LENGTH); consumed = 2
+        }
         c == 's' && next == 'c' && (next2 == 'i' || next2 == 'e') -> { ipa.append(IPA_SH); consumed = 2 }
         c == 'q' && next == 'u' -> { ipa.append('k'); ipa.append('w'); consumed = 2 }
         // 'gu' + vowel acts like 'qu': the 'u' is a /w/ glide (guerra=gwerːa)

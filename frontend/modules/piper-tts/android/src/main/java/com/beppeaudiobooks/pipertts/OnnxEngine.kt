@@ -89,22 +89,21 @@ class OnnxEngine(modelPath: String, private val voice: VoiceConfig) {
         // The model output name is typically "output" but Piper variants
         // exist that name it differently. Use the first output regardless.
         val outVal = result.get(0)
-        @Suppress("UNCHECKED_CAST")
-        // Output shape is [batch=1, channels=1, samples] OR [batch=1, samples].
         val raw = outVal.value
-        pcm = when (raw) {
-          is Array<*> -> {
-            // could be Array<Array<FloatArray>> or Array<FloatArray>
-            val a0 = raw[0]
-            when (a0) {
-              is Array<*> -> (a0[0] as FloatArray)
-              is FloatArray -> a0
-              else -> error("unexpected nested output type ${a0?.javaClass}")
-            }
-          }
-          is FloatArray -> raw
-          else -> error("unexpected ONNX output type: ${raw?.javaClass}")
-        }
+        // Piper VITS models export with WILDLY different output shapes
+        // depending on the converter used:
+        //   • Standard rhasspy/piper:    [batch, channels, samples]
+        //     -> Array<Array<FloatArray>>
+        //   • Slimmed exports:           [batch, samples]
+        //     -> Array<FloatArray>
+        //   • Riccardo / older models:   [batch, 1, 1, samples]
+        //     -> Array<Array<Array<FloatArray>>>
+        //   • Some custom exports:       [samples]
+        //     -> FloatArray
+        // We unwrap recursively by walking down the [0] of every nested
+        // Object[] array until we hit a FloatArray. This avoids the
+        // brittle hand-coded "match the exact nesting depth" approach.
+        pcm = unwrapPcm(raw)
       }
     } finally {
       inputs.values.forEach { runCatching { it.close() } }
@@ -121,5 +120,51 @@ class OnnxEngine(modelPath: String, private val voice: VoiceConfig) {
 
   companion object {
     private const val TAG = "PiperOnnxEngine"
+
+    /**
+     * Recursively walk the ONNX output tensor's nested representation
+     * (in Kotlin, multi-dim float tensors come back as Object[] of
+     * Object[] of … of FloatArray) and return the leaf FloatArray with
+     * the actual PCM samples.
+     *
+     * Why this is needed: Piper exports its VITS model with shape
+     *   [batch, channels, samples]
+     * in the official rhasspy/piper toolchain, BUT custom converters
+     * (e.g. Optimum, manual onnx-simplifier passes) sometimes produce:
+     *   [batch, 1, 1, samples]  -- redundant unit-dim from squeeze ops
+     *   [batch, samples]        -- 2D slim export
+     *   [samples]               -- already-unbatched (rare)
+     * The Riccardo bundled voice in our repo happens to have a 4D
+     * output which used to crash with "float[][] cannot be cast to
+     * float[]" because we tried `(a0[0] as FloatArray)` expecting 3D.
+     *
+     * This unwrapper is shape-agnostic: it just follows [0] until it
+     * finds a FloatArray. For multi-batch outputs (rare in Piper) it
+     * would discard everything except batch 0, which is the desired
+     * behavior since we always call synth with batch=1.
+     */
+    @JvmStatic
+    fun unwrapPcm(obj: Any?): FloatArray {
+      var current: Any? = obj
+      var depth = 0
+      while (current is Array<*>) {
+        if (current.isEmpty()) {
+          throw RuntimeException(
+            "ONNX output contained an empty array at depth=$depth")
+        }
+        current = current[0]
+        depth += 1
+        if (depth > 8) {
+          // Safety against pathological inputs; no real Piper model is
+          // ever this deep.
+          throw RuntimeException(
+            "ONNX output unwrap depth exceeded 8; refusing to recurse further")
+        }
+      }
+      if (current is FloatArray) return current
+      throw RuntimeException(
+        "ONNX output leaf is not a FloatArray (got ${current?.javaClass}); " +
+        "the model's output tensor is not compatible with Piper VITS expectations")
+    }
   }
 }

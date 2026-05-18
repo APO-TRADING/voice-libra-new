@@ -315,6 +315,18 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     // SOFT pause: keep the playLoop awaiting, keep the lockscreen visible,
     // keep the current sentence's WAV loaded. Just halt audio output.
     // Pressing play() (on-screen or from lockscreen) resumes mid-sentence.
+    //
+    // GUARD: only mark the player as soft-paused if we are actually mid-
+    // playback. Calling pause() on an idle player (e.g. from load() when
+    // entering a fresh book) would otherwise leave pausedRef=true and
+    // hijack the NEXT play() press into a no-op resume path. The user-
+    // visible symptom was: tap Play on a fresh book → trace shows
+    // "play.resume :: idx=0" → expo-audio.resume() on an unloaded
+    // player → no audio. This is the fix.
+    if (!playingRef.current && !pausedRef.current) {
+      tracePiper('pause.noop', 'not currently playing or paused');
+      return;
+    }
     tracePiper('pause.tap', `idx=${indexRef.current}`);
     pausedRef.current = true;
     playingRef.current = false;
@@ -371,7 +383,18 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       tracePiper('load.skip', 'same book already loaded');
       return;
     }
-    pause();
+    // PATCH (v12.0 multi-voice): switching to a DIFFERENT book must do a
+    // HARD reset of the playback refs, not a soft pause(). The previous
+    // implementation called pause() which set pausedRef=true; the
+    // pausedRef then survived the load() and made the very next play()
+    // press on the new book take the "resume" path and stall (logs
+    // showed "play.resume :: idx=0" → "audio.resume :: soft" → silence).
+    // We now do a full stopAll() and zero out both refs so the new
+    // book always starts via the fresh-play path.
+    pausedRef.current = false;
+    playingRef.current = false;
+    setIsPlaying(false);
+    await stopAll();
     try {
       const book: BookFull = await api.getBook(id);
       setBookId(book.id);
@@ -393,7 +416,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       tracePiper('load.err', String(e?.message || e));
       throw e;
     }
-  }, [pause]);
+  }, [stopAll]);
 
   const updateLengthScale = useCallback((v: number) => {
     const clamped = Math.max(0.5, Math.min(2.0, v));
