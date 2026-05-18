@@ -54,21 +54,26 @@ object ItalianPhonemizer {
 
   // Optional word -> IPA dictionary loaded once at engine init. Built
   // offline by running real espeak-ng on a frequency-sorted list of the
-  // top ~50k Italian words; ships as Android asset `it_phonemes.json.gz`.
-  // Coverage: ~95-99% of typical Italian audiobook text. Words not in
-  // the dictionary fall through to the rule-based engine below, which
-  // gets stress + glides + intervocalic-s right but mispredicts open/
-  // close 'e'/'o' on a small minority of cases.
+  // top ~50k words PER LANGUAGE; one .json.gz asset per supported
+  // language (it, en, es, fr, de). Coverage: ~95-99% of typical
+  // audiobook text. Words not in the dictionary fall through to the
+  // rule-based engine below FOR ITALIAN ONLY; for other languages,
+  // OOV words are silently skipped (which means a small audible gap
+  // but no garbled phonemes).
   @Volatile
   private var dictionary: Map<String, String> = emptyMap()
+  @Volatile
+  private var currentLang: String = ""
 
-  /** Load the bundled word→IPA dictionary. Idempotent. */
-  fun setDictionary(dict: Map<String, String>) {
+  /** Load the bundled word→IPA dictionary for a given base language. */
+  fun setDictionary(dict: Map<String, String>, langCode: String) {
     dictionary = dict
+    currentLang = langCode.lowercase()
   }
 
-  /** Diagnostic helper. */
+  /** Diagnostic helpers. */
   fun dictionarySize(): Int = dictionary.size
+  fun dictionaryLanguage(): String = currentLang
 
   // Front vowels that trigger c/g palatalization.
   private val FRONT_VOWELS = charArrayOf('e', 'i', '\u00E8', '\u00E9', '\u00EC', '\u00ED')
