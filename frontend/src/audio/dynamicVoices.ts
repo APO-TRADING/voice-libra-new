@@ -200,8 +200,23 @@ async function importFromFiles(
 
 async function importFromZip(zipUri: string, zipName: string): Promise<DynamicVoiceMeta> {
   const info_ = await FileSystem.getInfoAsync(zipUri, { size: true } as any);
-  if ((info_ as any).size && (info_ as any).size > MAX_MODEL_BYTES + 50 * 1024 * 1024) {
+  const zipSize = (info_ as any).size || 0;
+  if (zipSize > MAX_MODEL_BYTES + 50 * 1024 * 1024) {
     throw new Error(`Archivio ZIP troppo grande.`);
+  }
+  // MEMORY GUARD: reading a 150MB+ zip as base64 → bytes → entries triples
+  // the RAM peak (base64 string + Uint8Array + decompressed entries). On
+  // low-end Android devices (1-2 GB RAM) this can trigger OOM. We refuse
+  // anything > 150 MB and instruct the user to extract on PC and import
+  // the files separately, which streams via FileSystem.copyAsync and uses
+  // ~30x less RAM.
+  if (zipSize > 150 * 1024 * 1024) {
+    throw new Error(
+      `Archivio ZIP troppo grande per essere decompresso in memoria ` +
+        `(${Math.round(zipSize / 1024 / 1024)} MB > 150 MB). ` +
+        `Estrai il .zip sul PC e seleziona i file model.onnx + model.onnx.json ` +
+        `direttamente (tieni premuto per la selezione multipla nel picker).`,
+    );
   }
   // Read the zip as base64, then decode to bytes
   const b64 = await FileSystem.readAsStringAsync(zipUri, { encoding: FileSystem.EncodingType.Base64 });

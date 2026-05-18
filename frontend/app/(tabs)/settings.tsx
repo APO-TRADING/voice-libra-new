@@ -22,7 +22,6 @@ import type { VoiceMeta } from '../../src/audio/piperAssets';
 import {
   deleteDynamicVoice,
   importVoice,
-  listDynamicVoices,
   type DynamicVoiceMeta,
 } from '../../src/audio/dynamicVoices';
 import { usePlayer } from '../../src/contexts/PlayerContext';
@@ -161,10 +160,18 @@ export default function SettingsScreen() {
               if (isActive) {
                 const bundled = listVoices();
                 const fallback = bundled[0]?.id;
-                if (fallback) {
-                  await setCurrentVoiceId(fallback);
-                  setActiveVoiceId(fallback);
+                if (!fallback) {
+                  // Should never happen since bundled voices ship in the
+                  // APK, but defensively bail out so we don't end up with
+                  // an undefined active voice.
+                  Alert.alert(
+                    t('common.error'),
+                    'Impossibile eliminare la voce attiva: nessuna voce di sistema disponibile come fallback.',
+                  );
+                  return;
                 }
+                await setCurrentVoiceId(fallback);
+                setActiveVoiceId(fallback);
                 // Force the native module to close its OrtSession + free
                 // its handle on the model file. This is async and waits
                 // for the new voice to load (best-effort; we still proceed
