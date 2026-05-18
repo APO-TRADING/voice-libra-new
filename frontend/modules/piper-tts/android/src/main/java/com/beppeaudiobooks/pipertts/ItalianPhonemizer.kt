@@ -88,6 +88,11 @@ object ItalianPhonemizer {
   // Front vowels that trigger c/g palatalization.
   private val FRONT_VOWELS = charArrayOf('e', 'i', '\u00E8', '\u00E9', '\u00EC', '\u00ED')
 
+  // Plain (unaccented) Italian vowels. Used by isPlainVowel() to detect
+  // syllable nuclei in the orthographic input. Italian has exactly these
+  // five orthographic vowels; accented variants are handled separately.
+  private val PLAIN_VOWELS = charArrayOf('a', 'e', 'i', 'o', 'u')
+
   // Accented vowels that indicate WORD-FINAL stress (tronca).
   private val FINAL_ACCENTED_VOWELS = charArrayOf(
     '\u00E0', // à
