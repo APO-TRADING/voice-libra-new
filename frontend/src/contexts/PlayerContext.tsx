@@ -259,7 +259,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
           setPiperError(`init-exception: ${e?.message || String(e)}`);
         }
       }
-      // TrackPlayer owns the lockscreen / notification UI now. The track
+      // expo-audio owns the lockscreen / notification UI now. The track
       // metadata (book title + author) is set per-sentence inside
       // speakSentence() via the meta object passed from speakOne() below.
       playLoop(indexRef.current);

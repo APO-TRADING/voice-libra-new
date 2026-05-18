@@ -87,12 +87,12 @@ dependencies {
   //noinspection GradleDynamicVersion
   implementation "com.facebook.react:react-native:+"
 
-  // Microsoft ONNX Runtime for Android \u2014 official Maven release. Supports
+  // Microsoft ONNX Runtime for Android — official Maven release. Supports
   // FP32, FP16, INT8 models natively via its kernel set.
   implementation "com.microsoft.onnxruntime:onnxruntime-android:1.19.2"
 
-  // MediaSessionCompat + lock-screen artwork support.
-  implementation "androidx.media:media:1.7.0"
+  // AndroidX core (used for general Kotlin extensions). Lockscreen + media
+  // notification is owned by expo-audio now; no MediaSessionCompat needed.
   implementation "androidx.core:core-ktx:1.13.1"
 
   // Kotlin coroutines for the synthesize() async pipeline.

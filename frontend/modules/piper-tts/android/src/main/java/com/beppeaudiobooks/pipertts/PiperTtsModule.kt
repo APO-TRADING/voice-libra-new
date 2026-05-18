@@ -158,13 +158,14 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
   /**
    * Synthesize the given text and write the resulting PCM as a 16-bit
    * mono WAV file in the app's cache directory. Returns the absolute path
-   * so JS can hand it to react-native-track-player.
+   * so JS can hand it to expo-audio.
    *
    * This is the CORE synthesis primitive for the new architecture:
    *   text -> phonemes -> ONNX inference -> PCM -> WAV on disk -> path
-   * No playback is performed here. PlayerContext.tsx queues the WAV file
-   * via TrackPlayer.add(), which owns the rest of the playback lifecycle
-   * (audio output + lockscreen notification + media buttons).
+   * No playback is performed here. PlayerContext.tsx feeds the WAV file
+   * to expo-audio's AudioPlayer.replace(), which owns the rest of the
+   * playback lifecycle (audio output + lockscreen notification + media
+   * buttons via setActiveForLockScreen).
    */
   @ReactMethod
   fun synthesizeToFile(text: String, sid: Int, speed: Float, promise: Promise) {
@@ -225,7 +226,7 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
 
   /**
    * Best-effort cancellation of any in-flight synthesis.
-   * Does NOT touch playback (TrackPlayer is the playback owner now).
+   * Does NOT touch playback (expo-audio is the playback owner now).
    */
   @ReactMethod
   fun stopPlayback(promise: Promise) {
