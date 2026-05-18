@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
@@ -13,6 +14,7 @@ import android.os.IBinder
 import android.util.Base64
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.media.session.MediaButtonReceiver
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
@@ -52,17 +54,30 @@ class PiperPlaybackService : Service() {
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    when (intent?.action) {
+    val action = intent?.action
+    // CRITICAL: if we were spawned via startForegroundService() (API 26+),
+    // Android requires us to call startForeground() within ~5 seconds OR
+    // the OS will throw RemoteServiceException and kill us. So we move it
+    // to the very top of the method, BEFORE any branching that could miss
+    // the call (e.g. unexpected/null actions delivered after a system
+    // restart of the service, or media button intents routed via the
+    // MediaSession that don't carry one of our explicit actions).
+    if (action != ACTION_STOP) {
+      promoteToForeground()
+    }
+    when (action) {
       ACTION_START, ACTION_UPDATE -> {
         intent.getStringExtra(EXTRA_TITLE)?.let  { lastTitle = it }
         intent.getStringExtra(EXTRA_AUTHOR)?.let { lastAuthor = it }
         intent.getStringExtra(EXTRA_COVER)?.let  { lastCoverB64 = it }
         if (intent.hasExtra(EXTRA_PLAYING)) lastIsPlaying = intent.getBooleanExtra(EXTRA_PLAYING, true)
-        startForeground(NOTIF_ID, buildNotification())
+        // Re-emit with the freshly updated state so the lock-screen UI
+        // reflects e.g. cover changes.
+        promoteToForeground()
         publishMediaState()
       }
       ACTION_STOP -> {
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         mediaSession?.isActive = false
         mediaSession?.release()
         mediaSession = null
@@ -71,6 +86,38 @@ class PiperPlaybackService : Service() {
       else -> MediaButtonReceiver.handleIntent(mediaSession, intent)
     }
     return START_NOT_STICKY
+  }
+
+  /**
+   * Calls startForeground() with the correct signature for the running OS
+   * version. On Android 14+ (API 34, UPSIDE_DOWN_CAKE) we MUST pass the
+   * service type matching the manifest declaration
+   * (foregroundServiceType="mediaPlayback") or the OS throws
+   * MissingForegroundServiceTypeException.
+   *
+   * On Android 7.0-7.1.1 (API 24-25), Service.startForeground() exists but
+   * does not accept a service-type argument; we call the legacy 2-arg form.
+   */
+  private fun promoteToForeground() {
+    val notification = buildNotification()
+    try {
+      if (Build.VERSION.SDK_INT >= 34) {
+        ServiceCompat.startForeground(
+          this,
+          NOTIF_ID,
+          notification,
+          ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+        )
+      } else {
+        startForeground(NOTIF_ID, notification)
+      }
+    } catch (e: Throwable) {
+      // Newer Androids can deny foreground promotion when the app is
+      // backgrounded for too long (ForegroundServiceStartNotAllowedException
+      // on API 31+). We log + degrade gracefully \u2014 audio still plays via
+      // AudioTrack, just without the lock-screen notification.
+      Log.w(TAG, "promoteToForeground failed: ${e.javaClass.simpleName} ${e.message}")
+    }
   }
 
   override fun onDestroy() {

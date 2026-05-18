@@ -1,7 +1,9 @@
 package com.beppeaudiobooks.pipertts
 
 import android.content.Intent
+import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -277,6 +279,37 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
       promise.resolve(null)
     } catch (e: Throwable) {
       promise.reject("E_FG_STOP", e.message ?: e.javaClass.simpleName, e)
+    }
+  }
+
+  // Methods required by NativeEventEmitter so JS doesn't crash registering
+  // listeners (we emit `piperMediaAction` and `piperAudioFocus` from
+  // PiperPlaybackService via DeviceEventManagerModule.RCTDeviceEventEmitter).
+  @ReactMethod fun addListener(eventName: String) { /* no-op */ }
+  @ReactMethod fun removeListeners(count: Int) { /* no-op */ }
+
+  override fun invalidate() {
+    super.invalidate()
+    ttsScope.cancel()
+    player.release()
+    engineRef.getAndSet(null)?.close()
+  }
+
+  companion object {
+    private const val TAG = "PiperTtsModule"
+
+    /** Helper used from PiperPlaybackService to dispatch media-button events back to JS. */
+    fun emit(reactContext: ReactApplicationContext, eventName: String, params: com.facebook.react.bridge.WritableMap) {
+      reactContext
+        .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+        .emit(eventName, params)
+    }
+  }
+}
+
+private fun ReadableMap.takeIfHas(key: String): ReadableMap? =
+  if (this.hasKey(key) && !this.isNull(key)) this else null
+javaClass.simpleName, e)
     }
   }
 

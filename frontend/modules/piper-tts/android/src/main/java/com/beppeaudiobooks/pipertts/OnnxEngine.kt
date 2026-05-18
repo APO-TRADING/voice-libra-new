@@ -4,7 +4,6 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.util.Log
-import java.io.File
 import java.nio.FloatBuffer
 import java.nio.LongBuffer
 
@@ -41,8 +40,11 @@ class OnnxEngine(modelPath: String, private val voice: VoiceConfig) {
       setIntraOpNumThreads(4)
     }
     Log.i(TAG, "Loading ONNX model from $modelPath")
-    val modelBytes = File(modelPath).readBytes()
-    session = env.createSession(modelBytes, opts)
+    // Use the path-based createSession so ORT can mmap() the model file
+    // directly instead of us reading the whole thing into a Java byte[].
+    // This matters for medium/high-quality Piper models (60-100 MB) on
+    // low-memory devices: byte[] would briefly DOUBLE the memory peak.
+    session = env.createSession(modelPath, opts)
     hasSpeakerInput = session.inputNames.contains("sid")
     Log.i(TAG, "Model loaded. inputs=${session.inputNames} hasSid=$hasSpeakerInput outputs=${session.outputNames}")
   }

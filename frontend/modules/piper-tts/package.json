@@ -1,6 +1,6 @@
 {
   "name": "piper-tts",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "On-device Piper TTS for React Native: Microsoft ONNX Runtime + piper-phonemize + espeak-ng. No sherpa-onnx dependency.",
   "main": "src/index.ts",
   "types": "src/index.ts",

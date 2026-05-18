@@ -75,32 +75,40 @@ data class VoiceConfig(
    * integer ID sequence that Piper's VITS model expects.
    *
    * Standard Piper pre-processing (from rhasspy/piper-phonemize):
-   *   1. Prepend BOS = "^" (id 1)
+   *   1. Prepend BOS = "^" (id 1 by convention)
    *   2. For each phoneme character, append PAD ("_", id 0) after the phoneme.
    *   3. Append EOS = "$" (id 2)
    *
-   * Some IPA codepoints are multi-byte sequences but the phoneme_id_map uses
-   * SINGLE-character UTF-16 keys most of the time. We iterate codepoints to
-   * stay UTF-32 safe, and look up each one in the map.
+   * We iterate codepoints to stay UTF-32 safe, and look up each one in the
+   * phoneme_id_map. Some IPA codepoints are multi-byte sequences but the
+   * map's keys are usually a single character each (piper-phonemize splits
+   * IPA per-character before lookup, never per-phoneme).
+   *
+   * Defensive fallback: if the .onnx.json does NOT contain "^", "_", "$"
+   * mappings (rare \u2014 every standard Piper model has them), fall back to
+   * the conventional IDs (1, 0, 2) to keep the model from outputting
+   * silence. This costs nothing on well-formed configs.
    */
   fun textToInputIds(ipaText: String): IntArray {
     val out = ArrayList<Int>(ipaText.length * 2 + 8)
+    val bos = phonemeIdMap["^"] ?: intArrayOf(1)
+    val pad = phonemeIdMap["_"] ?: intArrayOf(0)
+    val eos = phonemeIdMap["$"] ?: intArrayOf(2)
     // BOS
-    phonemeIdMap["^"]?.forEach { out.add(it) }
-    val pad = phonemeIdMap["_"]
+    for (id in bos) out.add(id)
     var i = 0
     while (i < ipaText.length) {
       val cp = ipaText.codePointAt(i)
       val cpStr = String(Character.toChars(cp))
       val ids = phonemeIdMap[cpStr]
       if (ids != null) {
-        ids.forEach { out.add(it) }
-        pad?.forEach { out.add(it) }
+        for (id in ids) out.add(id)
+        for (id in pad) out.add(id)
       }
       i += Character.charCount(cp)
     }
     // EOS
-    phonemeIdMap["$"]?.forEach { out.add(it) }
+    for (id in eos) out.add(id)
     return out.toIntArray()
   }
 }
