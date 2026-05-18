@@ -1,37 +1,46 @@
 // piper-tts: JavaScript bridge for the local native module.
-// Provides exactly the same surface (NativeModules.TTSManager) that the old
-// react-native-sherpa-onnx-offline-tts patch exposed, so piperEngine.ts can
-// migrate with a one-line require() change.
+//
+// This file is intentionally minimal — the app does NOT import from
+// 'piper-tts' as a package. Instead, src/audio/piperBridge.ts reads
+// NativeModules.TTSManager directly. We keep this entry so that:
+//   1. The package.json `main` field has a valid target file.
+//   2. Future consumers can `import { isPiperAvailable } from 'piper-tts'`.
+//
+// API surface (mirrored in src/audio/piperBridge.ts):
+//   loadVoice(modelPath, configJson, espeakDataPath) -> {sampleRate, ...}
+//   synthesizeToFile(text, sid, speed) -> {path, sampleRate, durationMs, ...}
+//   stopPlayback() -> void           (cancels in-flight synthesis)
+//   deleteWavFile(path) -> boolean
+//   cleanupWavCache() -> number
+//   unloadVoice() -> void
 import { NativeModules } from 'react-native';
 
 const { TTSManager } = NativeModules as {
   TTSManager?: {
-    // Voice management
-    listVoices: () => Promise<VoiceInfo[]>;
-    loadVoice: (voiceId: string) => Promise<{ sampleRate: number; lengthScale: number; noiseScale: number; noiseW: number; }>;
+    loadVoice: (modelPath: string, configJson: string, espeakDataPath: string) => Promise<{
+      sampleRate: number;
+      lengthScale: number;
+      noiseScale: number;
+      noiseW: number;
+      languageCode: string;
+      languageName: string;
+      numSpeakers: number;
+      numSymbols: number;
+      espeakVoice: string;
+      nativePhonemizer: boolean;
+    }>;
     unloadVoice: () => Promise<void>;
-    // Synthesis & playback
-    generateAndPlay: (text: string, _sid: number, speed: number) => Promise<void>;
+    synthesizeToFile: (text: string, sid: number, speed: number) => Promise<{
+      path: string;
+      sampleRate: number;
+      numSamples: number;
+      durationMs: number;
+      synthMs: number;
+    }>;
     stopPlayback: () => Promise<void>;
-    // Legacy compatibility shims
-    initializeTTS?: (sampleRate: number, channels: number, configJson: string) => Promise<string>;
-    deinitialize?: () => Promise<void>;
-    // MediaSession / foreground service
-    startPlaybackSession: (info: { title: string; author?: string | null; coverBase64?: string | null; isPlaying?: boolean }) => Promise<void>;
-    updatePlaybackSession: (info: { title?: string; author?: string | null; coverBase64?: string | null; isPlaying?: boolean }) => Promise<void>;
-    stopPlaybackSession: () => Promise<void>;
+    deleteWavFile: (path: string) => Promise<boolean>;
+    cleanupWavCache: () => Promise<number>;
   };
-};
-
-export type VoiceInfo = {
-  id: string;
-  name: string;
-  language: string;
-  quality: string;
-  sampleRate: number;
-  numSpeakers: number;
-  espeakVoice: string;
-  sizeBytes: number;
 };
 
 export function isPiperAvailable(): boolean {
