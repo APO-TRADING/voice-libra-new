@@ -598,23 +598,6 @@ export async function pauseSpeak(): Promise<void> {
 }
 
 // =========================================================================
-// LEGACY MediaSession WRAPPERS — NO-OPS now that TrackPlayer owns the
-// lockscreen UI. We keep the export signatures so PlayerContext.tsx
-// compiles unchanged; callers can be cleaned up incrementally.
-// =========================================================================
-
-export type PlaybackSession = {
-  title: string;
-  author?: string | null;
-  coverBase64?: string | null;
-  isPlaying: boolean;
-};
-
-export async function startPlaybackSession(_s: PlaybackSession): Promise<void> { /* no-op: TrackPlayer */ }
-export async function updatePlaybackSession(_s: Partial<PlaybackSession>): Promise<void> { /* no-op: TrackPlayer */ }
-export async function stopPlaybackSession(): Promise<void> { /* no-op: TrackPlayer */ }
-
-// =========================================================================
 // DIAGNOSTICS (used by Settings screen)
 // =========================================================================
 

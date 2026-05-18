@@ -113,4 +113,34 @@ export function onQueueEnded(cb: () => void): Sub {
   return { remove: () => { try { (sub as any)?.remove?.(); } catch { /* ignore */ } } };
 }
 
+// ---- Lockscreen / notification remote-control subscriptions ----
+//
+// These mirror Event.RemotePlay / Event.RemotePause / Event.RemoteStop to a
+// callback so PlayerContext can keep the React state (isPlaying, playingRef)
+// in sync with the OS-controlled media UI. The same events are ALSO routed
+// to the headless playback service (trackPlayerService.ts), which performs
+// the actual TrackPlayer.play()/pause()/reset() side-effects.
+
+export function onRemotePlay(cb: () => void): Sub {
+  const sub = TrackPlayer.addEventListener(Event.RemotePlay, () => cb());
+  return { remove: () => { try { (sub as any)?.remove?.(); } catch { /* ignore */ } } };
+}
+
+export function onRemotePause(cb: () => void): Sub {
+  const sub = TrackPlayer.addEventListener(Event.RemotePause, () => cb());
+  return { remove: () => { try { (sub as any)?.remove?.(); } catch { /* ignore */ } } };
+}
+
+export function onRemoteStop(cb: () => void): Sub {
+  const sub = TrackPlayer.addEventListener(Event.RemoteStop, () => cb());
+  return { remove: () => { try { (sub as any)?.remove?.(); } catch { /* ignore */ } } };
+}
+
+export function onPlaybackError(cb: (err: { code: string; message: string }) => void): Sub {
+  const sub = TrackPlayer.addEventListener(Event.PlaybackError, (data: any) =>
+    cb({ code: data?.code || 'unknown', message: data?.message || '' }),
+  );
+  return { remove: () => { try { (sub as any)?.remove?.(); } catch { /* ignore */ } } };
+}
+
 export function getStateEnum(): typeof State { return State; }

@@ -22,4 +22,8 @@ export async function tpGetQueueSize(): Promise<number> { return 0; }
 export function onTrackChanged(_cb: (info: { lastTrackId?: string; nextTrackId?: string }) => void): Sub { return { remove: () => {} }; }
 export function onPlaybackState(_cb: (state: any) => void): Sub { return { remove: () => {} }; }
 export function onQueueEnded(_cb: () => void): Sub { return { remove: () => {} }; }
+export function onRemotePlay(_cb: () => void): Sub { return { remove: () => {} }; }
+export function onRemotePause(_cb: () => void): Sub { return { remove: () => {} }; }
+export function onRemoteStop(_cb: () => void): Sub { return { remove: () => {} }; }
+export function onPlaybackError(_cb: (err: { code: string; message: string }) => void): Sub { return { remove: () => {} }; }
 export function getStateEnum(): any { return undefined; }

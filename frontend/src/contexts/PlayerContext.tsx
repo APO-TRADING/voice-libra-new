@@ -6,10 +6,15 @@
 // Pre-buffering: while a sentence is being spoken, the next-sentence
 // synthesis is initiated immediately so playback feels seamless.
 //
+// Lockscreen / background audio: react-native-track-player owns the
+// notification + lockscreen + media-buttons UI. We subscribe to its
+// remote-control events so an OS-level Play/Pause/Stop tap is reflected
+// in our React state and routes back through the same play() / pause() /
+// stop() actions the on-screen UI triggers.
+//
 // Singleton: any new play() call hard-stops the previous one before starting.
 import * as Speech from 'expo-speech';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { DeviceEventEmitter, NativeEventEmitter, NativeModules, Platform } from 'react-native';
 import { api, BookFull } from '../api/client';
 import {
   initEngine,
@@ -17,11 +22,16 @@ import {
   speakSentence as piperSpeak,
   stopSpeak as piperStop,
   getPiperDiagnostics,
-  startPlaybackSession,
-  updatePlaybackSession,
-  stopPlaybackSession,
   tracePiper,
 } from '../audio/piperEngine';
+import {
+  onPlaybackState,
+  onRemotePause,
+  onRemotePlay,
+  onRemoteStop,
+  onPlaybackError,
+  getStateEnum,
+} from '../audio/audiobookPlayer';
 
 type State = {
   bookId: string | null;
@@ -71,7 +81,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const titleRef = useRef<string>('');
   const authorRef = useRef<string | null>(null);
   const coverUrlRef = useRef<string | null>(null);
-  const sessionStartedRef = useRef<boolean>(false);
   const generationRef = useRef(0); // monotonic ID to drop stale callbacks
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // PATCH (beppe-audiobooks v5): count consecutive Piper failures. Falling
@@ -92,49 +101,59 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { authorRef.current = author; }, [author]);
   useEffect(() => { coverUrlRef.current = coverUrl; }, [coverUrl]);
 
-  // PATCH (beppe-audiobooks v6): listen for media-button events from the
-  // foreground service notification (Android) — translate them into the
-  // same play()/pause()/jump() actions as the on-screen controls.
-  // Also reacts to audio-focus changes (incoming call, etc.).
+  // PATCH (beppe-audiobooks v7): lockscreen / notification remote-control
+  // events from react-native-track-player.
+  //   - Event.RemotePause  -> mirror to pause() so the on-screen UI updates
+  //     and the playback loop stops (the headless service already paused
+  //     the underlying track).
+  //   - Event.RemotePlay   -> mirror to play(), resuming from indexRef.
+  //   - Event.RemoteStop   -> fully stop the audiobook (clears queue,
+  //     blanks state). The headless service has already reset the queue;
+  //     we just propagate the state change to React.
+  //   - Event.PlaybackState -> visual-only sync for isPlaying (in case
+  //     the user tapped pause from the notification without removing the
+  //     track). We do NOT touch playingRef here, so the playLoop keeps
+  //     awaiting onQueueEnded and resumes when the user taps play again.
   // Use a ref to break the (otherwise circular) dependency cycle with
-  // play() / pause() / jump().
-  const ctrlRef = useRef<{ play: () => void; pause: () => void; jump: (d: number) => void } | null>(null);
+  // play() / pause() / stop().
+  const ctrlRef = useRef<{ play: () => void; pause: () => void; stop: () => void } | null>(null);
 
   useEffect(() => {
-    if (Platform.OS !== 'android') return;
-    let subAction: any;
-    let subFocus: any;
-    try {
-      const TTSManager = (NativeModules as any).TTSManager;
-      const emitter = TTSManager ? new NativeEventEmitter(TTSManager) : null;
-      const target: any = emitter || DeviceEventEmitter;
-      subAction = target.addListener('piperMediaAction', (e: { action: string }) => {
-        if (!e?.action) return;
-        tracePiper('media.button', e.action);
-        const c = ctrlRef.current;
-        if (!c) return;
-        if (e.action.endsWith('.PLAY')) c.play();
-        else if (e.action.endsWith('.PAUSE')) c.pause();
-        else if (e.action.endsWith('.NEXT')) c.jump(1);
-        else if (e.action.endsWith('.PREVIOUS')) c.jump(-1);
-        else if (e.action.endsWith('.STOP')) c.pause();
-      });
-      subFocus = target.addListener('piperAudioFocus', (e: { focus: number }) => {
-        tracePiper('audio.focus', `focus=${e?.focus}`);
-        // -1=AUDIOFOCUS_LOSS, -2=TRANSIENT, -3=CAN_DUCK, 1=GAIN
-        const c = ctrlRef.current;
-        if (!c) return;
-        if (e?.focus === -1 || e?.focus === -2) c.pause();
-        // For AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK (-3) we keep playing —
-        // the OS will lower our volume itself.
-      });
-    } catch (e) {
-      console.warn('[Player] native media listeners failed:', e);
-    }
+    const subPlay = onRemotePlay(() => {
+      tracePiper('remote.play', 'lockscreen tap');
+      ctrlRef.current?.play();
+    });
+    const subPause = onRemotePause(() => {
+      tracePiper('remote.pause', 'lockscreen tap');
+      ctrlRef.current?.pause();
+    });
+    const subStop = onRemoteStop(() => {
+      tracePiper('remote.stop', 'lockscreen tap');
+      ctrlRef.current?.stop();
+    });
+    const subState = onPlaybackState((s: any) => {
+      const StateEnum = getStateEnum();
+      if (!StateEnum) return;
+      // Reflect transport state in the UI without disrupting the loop.
+      // (Pause/Stop from the loop itself flips playingRef BEFORE these
+      // events fire, so we don't trip on our own writes.)
+      if (s === StateEnum.Playing || s === StateEnum.Buffering) {
+        if (!isPlaying && playingRef.current) setIsPlaying(true);
+      } else if (s === StateEnum.Paused) {
+        if (isPlaying) setIsPlaying(false);
+      }
+    });
+    const subErr = onPlaybackError((e: { code: string; message: string }) => {
+      tracePiper('tp.playback.error', `${e.code}: ${e.message}`);
+    });
     return () => {
-      try { subAction?.remove(); } catch { /* ignore */ }
-      try { subFocus?.remove(); } catch { /* ignore */ }
+      try { subPlay.remove(); } catch { /* ignore */ }
+      try { subPause.remove(); } catch { /* ignore */ }
+      try { subStop.remove(); } catch { /* ignore */ }
+      try { subState.remove(); } catch { /* ignore */ }
+      try { subErr.remove(); } catch { /* ignore */ }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // NOTE: do NOT call initEngine() here. We initialize Piper lazily on the
@@ -170,8 +189,22 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     if (isPiperReady()) {
       try {
-        // generateAndPlay resolves when the native player finishes the clip
-        await piperSpeak(text, ls);
+        // Lockscreen / notification metadata: ONLY the static book identity
+        // (title + author + voice). Per spec, we never put the running
+        // sentence text on the OS UI — too distracting and changes every
+        // few seconds.
+        const rawCover = coverUrlRef.current;
+        const tpCover =
+          rawCover && (rawCover.startsWith('http://') ||
+                       rawCover.startsWith('https://') ||
+                       rawCover.startsWith('file://'))
+            ? rawCover
+            : null;
+        await piperSpeak(text, ls, {
+          bookTitle: titleRef.current || 'Audiobook',
+          bookAuthor: authorRef.current || '',
+          coverUrl: tpCover,
+        });
         // PATCH (beppe-audiobooks v5): success → reset fail counter and
         // promote engine back to 'piper' if we were on 'device' fallback.
         if (piperFailCountRef.current > 0) {
@@ -256,28 +289,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
           setPiperError(`init-exception: ${e?.message || String(e)}`);
         }
       }
-      // PATCH (beppe-audiobooks v6): start (or update) the foreground
-      // service + MediaSession so the audiobook keeps playing with the
-      // screen off and the user gets lock-screen / notification controls.
-      const cover = coverUrlRef.current && coverUrlRef.current.startsWith('data:')
-        ? coverUrlRef.current
-        : null; // only embed when we have the actual bitmap as base64
-      if (!sessionStartedRef.current) {
-        sessionStartedRef.current = true;
-        startPlaybackSession({
-          title: titleRef.current || 'Audiobook',
-          author: authorRef.current,
-          coverBase64: cover,
-          isPlaying: true,
-        });
-      } else {
-        updatePlaybackSession({
-          title: titleRef.current || 'Audiobook',
-          author: authorRef.current,
-          coverBase64: cover,
-          isPlaying: true,
-        });
-      }
+      // TrackPlayer owns the lockscreen / notification UI now. The track
+      // metadata (book title + author) is set per-sentence inside
+      // speakSentence() via the meta object passed from speakOne() below.
       playLoop(indexRef.current);
     });
   }, [engine, playLoop, stopAll]);
@@ -286,15 +300,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     playingRef.current = false;
     setIsPlaying(false);
     stopAll();
-    // Update the notification to show the "play" button (the engine and
-    // wake-lock stay alive so the user can resume instantly).
-    if (sessionStartedRef.current) {
-      updatePlaybackSession({
-        title: titleRef.current || 'Audiobook',
-        author: authorRef.current,
-        isPlaying: false,
-      });
-    }
+    // TrackPlayer's own notification will flip to the "play" icon as soon
+    // as it receives the State.Paused transition triggered by stopAll() →
+    // tpStop() inside piperEngine. No extra work needed here.
   }, [stopAll]);
 
   const toggle = useCallback(() => {
@@ -326,11 +334,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     setCoverUrl(null);
     setSentences([]);
     setIndex(0);
-    // Tear down the foreground service + notification.
-    if (sessionStartedRef.current) {
-      sessionStartedRef.current = false;
-      stopPlaybackSession();
-    }
+    // TrackPlayer's queue was already reset inside stopAll() → tpStop(),
+    // and the foreground service tears itself down automatically when the
+    // queue is empty + the playback state is None.
   }, [pause]);
 
   const load = useCallback(async (id: string) => {
@@ -382,11 +388,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => () => { stopAll(); }, [stopAll]);
 
-  // Keep ctrlRef in sync so the native listener can dispatch back to
-  // the current handlers.
+  // Keep ctrlRef in sync so the OS remote-control listeners (lockscreen /
+  // notification) can dispatch back to the current handlers.
   useEffect(() => {
-    ctrlRef.current = { play, pause, jump };
-  }, [play, pause, jump]);
+    ctrlRef.current = { play, pause, stop };
+  }, [play, pause, stop]);
 
   const value = useMemo<Ctx>(() => ({
     bookId, title, author, coverUrl, sentences, index, isPlaying, lengthScale, engine, piperError, piperStep,
