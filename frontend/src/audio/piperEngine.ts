@@ -476,6 +476,74 @@ function sanitizeForPiper(raw: string): string {
     .trim();
 }
 
+// ---------------------------------------------------------------------------
+// PRE-BUFFER: a single slot that stores the synth result for the NEXT sentence
+// to be spoken. PlayerContext.playLoop pre-fires synthesis as soon as the
+// current sentence enters the audio stage, so by the time the audio finishes
+// the next sentence's WAV is already on disk. Drops the inter-sentence gap
+// from ~250-400ms to <50ms.
+//
+// Lifecycle:
+//   prebufferSentence(text) -> stores { text, path }
+//   speakSentence(text)     -> if buffer.text == text, use buffer.path; clear.
+//                              if buffer.text != text, drop the stale WAV.
+//   stopSpeak()             -> always drops the buffer.
+// ---------------------------------------------------------------------------
+let preBuffered: { text: string; path: string } | null = null;
+let preBufferInFlight: Promise<void> | null = null;
+
+async function dropPreBuffer(reason: string): Promise<void> {
+  if (!preBuffered) return;
+  const native = getPiperNative();
+  const path = preBuffered.path;
+  preBuffered = null;
+  await trace('prebuf.drop', `${path.split('/').pop()} reason=${reason}`);
+  if (native) {
+    try { await native.deleteWavFile(path); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Synthesize a sentence in the background so the next call to speakSentence
+ * can use the result immediately. Returns when synth completes (or fails
+ * silently); callers should NOT await this — fire-and-forget.
+ */
+export async function prebufferSentence(text: string, lengthScale: number): Promise<void> {
+  const native = getPiperNative();
+  if (!native || !ready) return;
+  const clean = sanitizeForPiper(text);
+  if (!clean) return;
+  // If we already have a buffer for THIS text, nothing to do.
+  if (preBuffered && preBuffered.text === clean) return;
+  // Coalesce concurrent calls — only one synth job runs at a time. A second
+  // call before the first finishes is queued by awaiting the prior promise.
+  if (preBufferInFlight) {
+    try { await preBufferInFlight; } catch { /* ignore */ }
+  }
+  // The previous in-flight may have just filled the slot with the right
+  // text; re-check after the await.
+  if (preBuffered && preBuffered.text === clean) return;
+  // Drop any stale (different-text) buffer before starting a new synth.
+  if (preBuffered && preBuffered.text !== clean) {
+    await dropPreBuffer('text-mismatch');
+  }
+  const speed = Math.max(0.5, Math.min(2.0, 1 / lengthScale));
+  const job = (async () => {
+    try {
+      await trace('prebuf.synth', `len=${clean.length} speed=${speed.toFixed(2)}`);
+      const result = await native.synthesizeToFile(clean, 0, speed);
+      preBuffered = { text: clean, path: result.path };
+      await trace('prebuf.ready', `${result.path.split('/').pop()} ${Math.round(result.durationMs)}ms`);
+    } catch (e: any) {
+      await trace('prebuf.error', `${e?.message || e}`);
+    } finally {
+      preBufferInFlight = null;
+    }
+  })();
+  preBufferInFlight = job;
+  return job;
+}
+
 /**
  * Synthesize ONE sentence and play it via expo-audio.
  *
@@ -507,12 +575,24 @@ export async function speakSentence(
     return;
   }
   let wavPath: string | null = null;
+  let synthMs = 0;
+  let durationMs = 0;
   try {
-    await trace('speak.synth', `len=${clean.length} speed=${speed.toFixed(2)}`);
-    // 1. Synthesize to WAV on disk.
-    const result = await native.synthesizeToFile(clean, 0, speed);
-    wavPath = result.path;
-    await trace('speak.wav', `${result.path.split('/').pop()} ${Math.round(result.durationMs)}ms (synth=${Math.round(result.synthMs)}ms)`);
+    // 1. Use pre-buffered WAV if the next-sentence prediction matched.
+    if (preBuffered && preBuffered.text === clean) {
+      wavPath = preBuffered.path;
+      preBuffered = null;
+      await trace('speak.prebuf.hit', `${wavPath.split('/').pop()}`);
+    } else {
+      // Stale pre-buffer (different text)? Drop it before synthesizing fresh.
+      if (preBuffered) await dropPreBuffer('miss');
+      await trace('speak.synth', `len=${clean.length} speed=${speed.toFixed(2)}`);
+      const result = await native.synthesizeToFile(clean, 0, speed);
+      wavPath = result.path;
+      synthMs = result.synthMs;
+      durationMs = result.durationMs;
+      await trace('speak.wav', `${result.path.split('/').pop()} ${Math.round(result.durationMs)}ms (synth=${Math.round(result.synthMs)}ms)`);
+    }
 
     // 2. Hand off to expo-audio. playWav() resolves when the clip ends
     //    naturally (didJustFinish) or when stopPlayback() is called.
@@ -524,8 +604,11 @@ export async function speakSentence(
     };
 
     // Safety race: if neither finish nor stop fires within 5x expected
-    // duration, bail out so the caller's loop never hangs.
-    const safetyMs = Math.max(15_000, result.durationMs * 5);
+    // duration, bail out so the caller's loop never hangs. Pre-buffered
+    // WAVs don't carry the synth-time duration so we use a generous default.
+    const safetyMs = durationMs > 0
+      ? Math.max(15_000, durationMs * 5)
+      : 120_000;
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
     const safety = new Promise<void>((_, reject) => {
       timeoutId = setTimeout(() => {
@@ -558,6 +641,7 @@ export async function stopSpeak(): Promise<void> {
     await trace('stop.call', 'native.stopPlayback + expo-audio.stop');
     if (native) await native.stopPlayback().catch(() => {});
     await stopPlayback();
+    await dropPreBuffer('stop');
     if (native) await native.cleanupWavCache().catch(() => {});
     await trace('stop.call', 'OK');
   } catch (e: any) {

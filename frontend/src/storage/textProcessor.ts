@@ -107,12 +107,67 @@ export function cleanText(input: string): string {
 }
 
 // Italian-aware sentence splitter.
+//
+// Splits ONLY at strong terminators (. ! ? …) — never at semicolons, colons,
+// or commas. Protects common Italian abbreviations and inline numerics so a
+// '.' inside "Sig. Mario", "3.14", or "1.000.000" does NOT split the sentence.
+//
+// Algorithm:
+//   1. Replace '.' with a non-breaking placeholder inside protected patterns:
+//      - Italian abbreviations: Sig., Sig.ra, Dott., Dr., Prof., pag., ecc.,
+//        n., art., es., cap., sec., min., kg., m., cm., Mr., Mrs., St., vol.
+//      - Numeric decimals/thousand-separators: 3.14, 1.000, 10.500.000
+//      - Single-letter initials: F. Smith, A. Manzoni
+//      - URLs and email addresses: www.example.com, a@b.com
+//   2. Run the strong-terminator splitter over the masked text.
+//   3. Trim each chunk and unmask placeholders so the output looks original.
+//
+// Edge case: if a sentence ends with one of these patterns (e.g. "...ecc.")
+// the trailing '.' stays masked, joining it with the next sentence. This
+// is the lesser evil compared to truncating in the middle of a noun phrase.
+const DOT_PLACEHOLDER = '\u0001';
+
+const IT_ABBREVIATIONS: RegExp[] = [
+  // Title abbreviations followed by capitalised name: "Sig. Mario"
+  /\b(Sig|Sig\.ra|Sigg|Dott|Dr|Dssa|Prof|Profssa|Avv|Ing|Arch|On|Ven|Mons|Rev|S|SS)\./g,
+  // Common short abbreviations followed by a word: "ecc.", "pag. 12"
+  /\b(ecc|pag|n|art|es|cap|vol|sec|min|kg|cm|mm|km|hr|h|ml|cl|c|tel|fax|via|p|pp)\./gi,
+  // English honorifics that often appear in translated text
+  /\b(Mr|Mrs|Ms|St|Jr|Sr)\./g,
+];
+
+// Single uppercase letter + period + space + Word -> initial.
+const INITIAL_PATTERN = /\b([A-ZÀ-Ý])\.\s+([A-ZÀ-Ý])/g;
+
+// Decimal / thousand-separator numbers: 1.234, 1.000.000, 3.14.
+const NUMERIC_PATTERN = /(\d)\.(\d)/g;
+
+// URL / email dots.
+const URL_PATTERN = /([a-zA-Z0-9])\.([a-zA-Z][a-zA-Z0-9])/g;
+
+function maskProtected(text: string): string {
+  let t = text;
+  for (const re of IT_ABBREVIATIONS) {
+    t = t.replace(re, (m) => m.slice(0, -1) + DOT_PLACEHOLDER);
+  }
+  // Initials need a different replacement (keep the trailing space + capital).
+  t = t.replace(INITIAL_PATTERN, (_m, a, b) => `${a}${DOT_PLACEHOLDER} ${b}`);
+  t = t.replace(NUMERIC_PATTERN, (_m, a, b) => `${a}${DOT_PLACEHOLDER}${b}`);
+  t = t.replace(URL_PATTERN, (_m, a, b) => `${a}${DOT_PLACEHOLDER}${b}`);
+  return t;
+}
+
+function unmask(text: string): string {
+  return text.replace(new RegExp(DOT_PLACEHOLDER, 'g'), '.');
+}
+
 export function splitSentences(text: string): string[] {
+  const masked = maskProtected(text);
   const out: string[] = [];
   const re = /[^.!?…]+(?:[.!?…]+["»”')\]]*|$)/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const s = m[0].trim();
+  while ((m = re.exec(masked)) !== null) {
+    const s = unmask(m[0]).trim();
     if (s) out.push(s);
   }
   return out;
