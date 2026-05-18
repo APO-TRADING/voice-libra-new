@@ -48,6 +48,7 @@
     "fflate": "^0.8.2",
     "lucide-react-native": "^1.14.0",
     "pdfjs-dist": "3.11.174",
+    "piper-tts": "file:./modules/piper-tts",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-native": "0.81.5",

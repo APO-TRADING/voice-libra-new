@@ -55,6 +55,42 @@ const MANIFEST = voicesManifest as { default_voice?: string; voices?: VoiceMeta[
 const MANIFEST_INDEX: Record<string, VoiceMeta> = {};
 (MANIFEST.voices || []).forEach((v) => { MANIFEST_INDEX[v.id] = v; });
 
+// Quick mapping for the most common espeak-ng voice codes -> display name
+// and flag. Used when the .onnx.json's `language` field is null/missing
+// (typical for community-trained custom voices). This avoids "Unknown" in
+// the picker.
+const ESPEAK_TO_LANG: Record<string, string> = {
+  it: 'Italiano',
+  en: 'English', 'en-us': 'English (US)', 'en-gb': 'English (UK)',
+  es: 'Español', 'es-419': 'Español (LatAm)',
+  fr: 'Français', 'fr-fr': 'Français (France)',
+  de: 'Deutsch',
+  pt: 'Português', 'pt-br': 'Português (BR)',
+  ru: 'Русский',
+  nl: 'Nederlands',
+  pl: 'Polski',
+  ca: 'Català',
+  ro: 'Română',
+  el: 'Ελληνικά',
+  tr: 'Türkçe',
+  uk: 'Українська',
+  ar: 'العربية',
+  hi: 'हिन्दी',
+  zh: '中文',
+  ja: '日本語',
+  ko: '한국어',
+};
+const ESPEAK_TO_FLAG: Record<string, string> = {
+  it: '🇮🇹',
+  en: '🇬🇧', 'en-us': '🇺🇸', 'en-gb': '🇬🇧',
+  es: '🇪🇸', 'es-419': '🇲🇽',
+  fr: '🇫🇷', 'fr-fr': '🇫🇷',
+  de: '🇩🇪',
+  pt: '🇵🇹', 'pt-br': '🇧🇷',
+  ru: '🇷🇺', nl: '🇳🇱', pl: '🇵🇱', ca: '🇪🇸', ro: '🇷🇴', el: '🇬🇷',
+  tr: '🇹🇷', uk: '🇺🇦', ar: '🇸🇦', hi: '🇮🇳', zh: '🇨🇳', ja: '🇯🇵', ko: '🇰🇷',
+};
+
 // =========================================================================
 // AUTO-DISCOVERY via Metro require.context
 // =========================================================================
@@ -128,7 +164,12 @@ export const PIPER_VOICES: Record<string, VoiceAsset> = {};
 const DISCOVERED_META: VoiceMeta[] = [];
 
 for (const [id, raw] of Object.entries(RAW)) {
-  if (typeof raw.model !== 'number' || !raw.config) {
+  // On native (Android/iOS) `require()` of an asset returns a number
+  // (the Metro asset module ID). On web it returns a string URL. We
+  // accept BOTH so the voice picker still renders on web (where the
+  // native TTS module is absent and the engine falls back gracefully).
+  const modelOk = typeof raw.model === 'number' || typeof raw.model === 'string';
+  if (!modelOk || !raw.config) {
     // eslint-disable-next-line no-console
     console.warn(`[piperAssets] voice "${id}" incomplete (model=${typeof raw.model}, config=${!!raw.config}). Skipping.`);
     continue;
@@ -142,26 +183,33 @@ for (const [id, raw] of Object.entries(RAW)) {
     console.warn(`[piperAssets] voice "${id}": .onnx="${raw.modelBaseName}" but .json="${raw.configBaseName}" (basenames differ).`);
   }
 
-  PIPER_VOICES[id] = { model: raw.model, config: raw.config };
+  PIPER_VOICES[id] = { model: raw.model as number, config: raw.config };
 
-  // Build display metadata. Prefer voices.json entry, else fall back to
-  // language fields from the .onnx.json sidecar itself.
+  // Build display metadata. Prefer voices.json entry, else derive from the
+  // .onnx.json sidecar itself. For models where `language` is null/missing
+  // (common for custom-trained voices), we fall back to mapping the
+  // espeak.voice code to a friendly language name.
   const manifestEntry = MANIFEST_INDEX[id];
   if (manifestEntry) {
     DISCOVERED_META.push(manifestEntry);
   } else {
     const cfg = raw.config as any;
-    const langName = cfg?.language?.name_english || cfg?.language?.name_native || 'Unknown';
-    const langCode = cfg?.language?.code || cfg?.espeak?.voice || '';
+    const espeakVoice = (cfg?.espeak?.voice || '').toLowerCase();
+    const langName =
+      cfg?.language?.name_english ||
+      cfg?.language?.name_native ||
+      ESPEAK_TO_LANG[espeakVoice] ||
+      (espeakVoice ? `(${espeakVoice})` : 'Sconosciuta');
+    const langCode = cfg?.language?.code || espeakVoice || '';
     DISCOVERED_META.push({
       id,
       name: id.charAt(0).toUpperCase() + id.slice(1),
       language: langName,
       language_code: langCode,
       quality: cfg?.audio?.quality || 'custom',
-      size_mb: 0, // unknown without filesystem stat
-      description: `Voce ${id} (auto-rilevata da ${raw.modelBaseName})`,
-      flag: '🎤',
+      size_mb: 0, // unknown without filesystem stat — we don't ship one
+      description: `Voce custom (espeak=${espeakVoice || '?'})`,
+      flag: ESPEAK_TO_FLAG[espeakVoice] || '🎤',
     });
   }
 }
