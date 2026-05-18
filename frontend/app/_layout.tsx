@@ -6,6 +6,12 @@
 // full WHATWG-compliant URL + URLSearchParams BEFORE any other module is
 // loaded.
 import 'react-native-url-polyfill/auto';
+// Side-effect: registers the react-native-track-player headless playback
+// service so OS-level media buttons (play/pause/stop from lockscreen and
+// notification tray) keep working even when our React tree is not mounted.
+// This MUST be the first non-polyfill import so the registration happens
+// before any other module touches React.
+import '../src/audio/trackPlayerBootstrap';
 
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';

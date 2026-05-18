@@ -456,8 +456,19 @@ export function isPiperReady(): boolean {
 }
 
 // =========================================================================
-// SPEECH API
+// SPEECH API (TrackPlayer-backed)
 // =========================================================================
+
+import {
+  ensureTrackPlayerSetup,
+  enqueueSentence as tpEnqueue,
+  tpPlay,
+  tpPause as tpPauseFn,
+  tpStop,
+  onQueueEnded,
+  onTrackChanged,
+  type SentenceMetadata,
+} from './audiobookPlayer';
 
 function sanitizeForPiper(raw: string): string {
   return raw
@@ -468,7 +479,23 @@ function sanitizeForPiper(raw: string): string {
     .trim();
 }
 
-export async function speakSentence(text: string, lengthScale: number): Promise<void> {
+/**
+ * Synthesize ONE sentence and play it via react-native-track-player.
+ *
+ * Resolves when the track finishes playing naturally (track-ended event),
+ * or rejects when the user hard-stops via lockscreen / app stop button.
+ * On pause-from-lockscreen the promise keeps awaiting \u2014 the track is
+ * paused, not aborted; resume continues the same track to completion.
+ *
+ * @param text         the raw sentence text to read
+ * @param lengthScale  Piper length_scale; speed = 1 / lengthScale
+ * @param meta         optional override for lockscreen title/artist/album
+ */
+export async function speakSentence(
+  text: string,
+  lengthScale: number,
+  meta?: Partial<SentenceMetadata>,
+): Promise<void> {
   const native = getPiperNative();
   if (!native || !ready) {
     await trace('speak.skip', `ready=${ready} native=${!!native}`);
@@ -481,8 +508,64 @@ export async function speakSentence(text: string, lengthScale: number): Promise<
     return;
   }
   try {
-    await trace('speak.start', `len=${clean.length} speed=${speed.toFixed(2)}`);
-    await native.generateAndPlay(clean, 0, speed);
+    await trace('speak.synth', `len=${clean.length} speed=${speed.toFixed(2)}`);
+    // 1. Synthesize to WAV on disk.
+    const result = await native.synthesizeToFile(clean, 0, speed);
+    await trace('speak.wav', `${result.path.split('/').pop()} ${Math.round(result.durationMs)}ms (synth=${Math.round(result.synthMs)}ms)`);
+
+    // 2. Reset queue + enqueue this single track.
+    //    Resetting before adding ensures we don't accumulate stale tracks
+    //    from previously interrupted sentences. PlayerContext.play() loop
+    //    awaits one sentence at a time, so a fresh queue is the right model.
+    await ensureTrackPlayerSetup();
+    await tpStop();
+    const trackId = await tpEnqueue(result.path, {
+      bookTitle: meta?.bookTitle || 'Audiobook',
+      bookAuthor: meta?.bookAuthor || 'Beppe Audiobooks',
+      voiceName: meta?.voiceName || currentVoiceMeta?.name || currentVoiceId,
+      coverUrl: meta?.coverUrl || null,
+    });
+    await trace('speak.enqueue', `id=${trackId}`);
+
+    // 3. Play and wait for completion.
+    await tpPlay();
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const sub1 = onQueueEnded(() => {
+        if (settled) return;
+        settled = true;
+        try { sub1.remove(); sub2.remove(); } catch { /* ignore */ }
+        // Delete the WAV file \u2014 we don't need it anymore.
+        native.deleteWavFile(result.path).catch(() => {});
+        resolve();
+      });
+      const sub2 = onTrackChanged((info) => {
+        // The track was REMOVED before it could end naturally (user stopped,
+        // queue was reset). Treat as completion of THIS speakSentence call,
+        // but the caller (PlayerContext) will see playingRef==false and
+        // won't advance to the next sentence.
+        if (info.lastTrackId === trackId && !info.nextTrackId) {
+          if (settled) return;
+          settled = true;
+          try { sub1.remove(); sub2.remove(); } catch { /* ignore */ }
+          native.deleteWavFile(result.path).catch(() => {});
+          resolve();
+        }
+      });
+      // Hard safety timeout: if neither event fires within 5\u00d7 expected
+      // playback duration, bail out so the caller's loop never hangs.
+      const safetyMs = Math.max(15_000, result.durationMs * 5);
+      setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { sub1.remove(); sub2.remove(); } catch { /* ignore */ }
+        native.deleteWavFile(result.path).catch(() => {});
+        trace('speak.timeout', `${safetyMs}ms elapsed without queue-end event`).catch(() => {});
+        reject(new Error(`Playback timeout after ${safetyMs}ms`));
+      }, safetyMs);
+    });
+
     await trace('speak.end', 'OK');
   } catch (e: any) {
     await trace('speak.error', `${e?.message || String(e)}`);
@@ -490,20 +573,34 @@ export async function speakSentence(text: string, lengthScale: number): Promise<
   }
 }
 
+/** Hard stop \u2014 cancels in-flight synthesis AND clears the TrackPlayer queue. */
 export async function stopSpeak(): Promise<void> {
   const native = getPiperNative();
-  if (!native) return;
   try {
-    await trace('stop.call', 'stopPlayback');
-    await native.stopPlayback();
+    await trace('stop.call', 'native.stopPlayback + TrackPlayer.reset');
+    if (native) await native.stopPlayback().catch(() => {});
+    await tpStop();
+    if (native) await native.cleanupWavCache().catch(() => {});
     await trace('stop.call', 'OK');
   } catch (e: any) {
     await trace('stop.call.err', `${e?.message || e}`);
   }
 }
 
+/** Soft pause via TrackPlayer \u2014 keeps queue intact so resume continues. */
+export async function pauseSpeak(): Promise<void> {
+  try {
+    await trace('pause.call', 'TrackPlayer.pause');
+    await tpPauseFn();
+  } catch (e: any) {
+    await trace('pause.call.err', `${e?.message || e}`);
+  }
+}
+
 // =========================================================================
-// MediaSession WRAPPERS (unchanged signatures)
+// LEGACY MediaSession WRAPPERS — NO-OPS now that TrackPlayer owns the
+// lockscreen UI. We keep the export signatures so PlayerContext.tsx
+// compiles unchanged; callers can be cleaned up incrementally.
 // =========================================================================
 
 export type PlaybackSession = {
@@ -513,47 +610,9 @@ export type PlaybackSession = {
   isPlaying: boolean;
 };
 
-export async function startPlaybackSession(s: PlaybackSession): Promise<void> {
-  const native = getPiperNative();
-  if (!native || typeof native.startPlaybackSession !== 'function') return;
-  try {
-    await trace('session.start', `title="${s.title.slice(0, 40)}" playing=${s.isPlaying}`);
-    await native.startPlaybackSession({
-      title: s.title || 'Audiobook',
-      author: s.author || '',
-      coverBase64: s.coverBase64 || null,
-      isPlaying: !!s.isPlaying,
-    });
-  } catch (e: any) {
-    await trace('session.start.err', `${e?.message || e}`);
-  }
-}
-
-export async function updatePlaybackSession(s: Partial<PlaybackSession>): Promise<void> {
-  const native = getPiperNative();
-  if (!native || typeof native.updatePlaybackSession !== 'function') return;
-  try {
-    await native.updatePlaybackSession({
-      title: s.title ?? 'Audiobook',
-      author: s.author ?? '',
-      coverBase64: s.coverBase64 ?? null,
-      isPlaying: typeof s.isPlaying === 'boolean' ? s.isPlaying : true,
-    });
-  } catch (e: any) {
-    await trace('session.update.err', `${e?.message || e}`);
-  }
-}
-
-export async function stopPlaybackSession(): Promise<void> {
-  const native = getPiperNative();
-  if (!native || typeof native.stopPlaybackSession !== 'function') return;
-  try {
-    await trace('session.stop', '');
-    await native.stopPlaybackSession();
-  } catch (e: any) {
-    await trace('session.stop.err', `${e?.message || e}`);
-  }
-}
+export async function startPlaybackSession(_s: PlaybackSession): Promise<void> { /* no-op: TrackPlayer */ }
+export async function updatePlaybackSession(_s: Partial<PlaybackSession>): Promise<void> { /* no-op: TrackPlayer */ }
+export async function stopPlaybackSession(): Promise<void> { /* no-op: TrackPlayer */ }
 
 // =========================================================================
 // DIAGNOSTICS (used by Settings screen)

@@ -14,15 +14,29 @@ export type PiperNative = {
     numSpeakers: number;
     numSymbols: number;
     espeakVoice: string;
+    nativePhonemizer: boolean;
   }>;
   unloadVoice: () => Promise<unknown>;
-  generateAndPlay: (text: string, sid: number, speed: number) => Promise<unknown>;
+  /**
+   * Synthesize text -> WAV file in the app's cache dir.
+   * Returns { path: absolute path to the .wav, sampleRate, numSamples, durationMs, synthMs }.
+   */
+  synthesizeToFile: (text: string, sid: number, speed: number) => Promise<{
+    path: string;
+    sampleRate: number;
+    numSamples: number;
+    durationMs: number;
+    synthMs: number;
+  }>;
+  /** Cancel any in-flight synthesis. */
   stopPlayback: () => Promise<unknown>;
+  /** Delete one WAV file (after the track finished playing). */
+  deleteWavFile: (path: string) => Promise<boolean>;
+  /** Nuke the whole WAV cache directory. */
+  cleanupWavCache: () => Promise<number>;
+  // Legacy compatibility shims
   initializeTTS?: (sr: number, ch: number, configJson: string) => Promise<unknown>;
   deinitialize?: () => Promise<unknown>;
-  startPlaybackSession: (info: { title?: string; author?: string | null; coverBase64?: string | null; isPlaying?: boolean }) => Promise<unknown>;
-  updatePlaybackSession: (info: { title?: string; author?: string | null; coverBase64?: string | null; isPlaying?: boolean }) => Promise<unknown>;
-  stopPlaybackSession: () => Promise<unknown>;
 };
 
 let cached: PiperNative | null | undefined;
