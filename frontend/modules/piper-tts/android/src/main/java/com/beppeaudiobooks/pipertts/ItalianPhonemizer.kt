@@ -267,6 +267,7 @@ object ItalianPhonemizer {
       val c = word[i]
       val next = if (i + 1 < n) word[i + 1] else ' '
       val next2 = if (i + 2 < n) word[i + 2] else ' '
+      val next3 = if (i + 3 < n) word[i + 3] else ' '
 
       // Track if this iteration produced an IPA vowel (for stress positioning).
       var producedVowelAt: Int = -1
@@ -278,16 +279,41 @@ object ItalianPhonemizer {
         c == 'c' && next == 'h' -> { ipa.append('k'); consumed = 2 }
         c == 'g' && next == 'h' -> { ipa.append(IPA_G); consumed = 2 }
         c == 'g' && next == 'n' -> { ipa.append(IPA_NJ); consumed = 2 }
-        // ---- GEMINATE PALATALIZATION ---------------------------------------
-        // "gg" + front vowel → /dːʒ/  (leggendo → ledʒːɛndo, oggi → ɔdʒːi)
-        // "cc" + front vowel → /tːʃ/  (accento → atːʃento, succede → sutːʃede)
-        // These MUST come before the single 'g'/'c' branches because:
-        //   1) The geminate produces a palatalized affricate, NOT a hard
-        //      /ɡː/ or /kː/ (which is what the single-consonant + geminate
-        //      logic would erroneously emit).
-        //   2) We consume both source chars (the "gg" / "cc") and emit
-        //      the IPA_LENGTH marker explicitly, so the post-digraph
-        //      geminate-detection block doesn't double-process.
+        // ---- "SILENT-i" PALATALIZED GEMINATES (consume 3 source chars) -----
+        // Italian orthography uses an 'i' between c/g + plain_vowel as a
+        // GRAPHIC marker for palatalization. The 'i' itself is NOT
+        // pronounced. We MUST consume it, otherwise the next iteration
+        // would treat it as a /j/ glide or full /i/ vowel, producing
+        // e.g. "passaggio" → /pasːadʒːjo/ instead of /pasːadʒːo/.
+        //
+        //   "cci" + a/o/u  → /tːʃ/ + that vowel    (faccia → fatːʃa)
+        //   "ggi" + a/o/u  → /dːʒ/ + that vowel    (passaggio → pasːadʒːo)
+        //   "sci" + a/o/u  → /ʃ/   + that vowel    (sciopero → ʃopero)
+        //   "gli" + a/o/u  → /ʎ/   + that vowel    (figlio → fiʎo)
+        //
+        // The next2 == 'i' guard distinguishes these from the "front
+        // vowel = e/i" geminate case (handled below), e.g. "leggendo"
+        // (gg+e, no silent i, /ledʒːendo/) vs "passaggio" (gg+i+a, has
+        // silent i, /pasːadʒːo/).
+        c == 'c' && next == 'c' && next2 == 'i' && isPlainVowel(next3) -> {
+          ipa.append('t'); ipa.append(IPA_SH); ipa.append(IPA_LENGTH); consumed = 3
+        }
+        c == 'g' && next == 'g' && next2 == 'i' && isPlainVowel(next3) -> {
+          ipa.append('d'); ipa.append(IPA_ZH); ipa.append(IPA_LENGTH); consumed = 3
+        }
+        c == 's' && next == 'c' && next2 == 'i' && isPlainVowel(next3) -> {
+          ipa.append(IPA_SH); consumed = 3
+        }
+        c == 'g' && next == 'l' && next2 == 'i' && isPlainVowel(next3) -> {
+          ipa.append(IPA_LJ); consumed = 3
+        }
+        // ---- GEMINATE PALATALIZATION (front-vowel = e or final-i) ----------
+        // "gg" + e/i_final → /dːʒ/  (leggendo → ledʒːendo, oggi → ɔdʒːi)
+        // "cc" + e/i_final → /tːʃ/  (accento → atʃːento, succede → sutʃːede)
+        // These MUST come AFTER the "silent-i + plain_vowel" rules above:
+        //   • "oggi" hits this rule (i is the FINAL vowel — pronounced)
+        //   • "passaggio" hits the silent-i rule above (i is followed
+        //     by plain_vowel — silent).
         c == 'g' && next == 'g' && isFrontVowel(next2) -> {
           ipa.append('d'); ipa.append(IPA_ZH); ipa.append(IPA_LENGTH); consumed = 2
         }
@@ -298,10 +324,10 @@ object ItalianPhonemizer {
         c == 'q' && next == 'u' -> { ipa.append('k'); ipa.append('w'); consumed = 2 }
         // 'gu' + vowel acts like 'qu': the 'u' is a /w/ glide (guerra=gwerːa)
         c == 'g' && next == 'u' && isPlainVowel(next2) -> { ipa.append(IPA_G); ipa.append('w'); consumed = 2 }
-        // gli + i  -> ʎi   (consume just "gl"; the following "i" goes through the vowel branch)
+        // gli + i  -> ʎi   (consume just "gl"; the following "i" goes through the vowel branch).
+        // The more specific "gli + plain_vowel" silent-i case is handled above.
         c == 'g' && next == 'l' && next2 == 'i' -> { ipa.append(IPA_LJ); consumed = 2 }
-        // SILENT-i palatalization: "c/g + i + vowel" -> only the affricate
-        // is pronounced; the 'i' is a graphical marker.
+        // SILENT-i palatalization for SINGLE c/g + i + vowel (no geminate).
         //   ciao    -> tʃao            (NOT tʃiao)
         //   giorno  -> dʒorno          (NOT dʒiorno)
         //   bacio   -> batʃo
@@ -320,7 +346,14 @@ object ItalianPhonemizer {
           if (isFrontVowel(next)) { ipa.append('d'); ipa.append(IPA_ZH) } else { ipa.append(IPA_G) }
           geminableConsonant = c
         }
-        c == 'z' -> { ipa.append('t'); ipa.append('s'); geminableConsonant = c }
+        c == 'z' -> {
+          // Word-initial 'z' → voiced /dz/  (zaino, zero, zucchero, zelo).
+          // Mid-word 'z' → voiceless /ts/ (default; espeak does the same
+          // for OOV — true intervocalic /dz/ would need lexical data).
+          if (i == 0) { ipa.append('d'); ipa.append('z') }
+          else        { ipa.append('t'); ipa.append('s') }
+          geminableConsonant = c
+        }
         // ---- VOWELS ---------------------------------------------------------
         c == 'a' || c == '\u00E0' -> { producedVowelAt = ipa.length; ipa.append('a') }
         // Plain 'e' defaults to CLOSE /e/ (most common in Italian unstressed
@@ -356,8 +389,17 @@ object ItalianPhonemizer {
           ipa.append(c)
           geminableConsonant = c
         }
-        // 's' is handled specially below in post-processing for intervocalic
-        // voicing; here we just emit 's'.
+        // Word-initial 's' before a VOICED consonant becomes /z/ (the
+        // "s impura sonora"):
+        //   sbaglio → zbaʎːo,  sdraio → zdrajo,  smettere → zmetːere
+        //   sgranchirsi → zgrankirsi,  slegare → zlegare
+        // Mid-word and pre-voiceless 's' stays /s/; intervocalic-/z/
+        // voicing is applied in a separate post-processing pass below.
+        c == 's' && i == 0 && (next == 'b' || next == 'd' || next == 'g' ||
+                                 next == 'l' || next == 'm' || next == 'n' ||
+                                 next == 'r' || next == 'v') -> {
+          ipa.append('z'); geminableConsonant = c
+        }
         c == 's' -> { ipa.append('s'); geminableConsonant = c }
         else -> { /* unknown char dropped silently */ }
       }
