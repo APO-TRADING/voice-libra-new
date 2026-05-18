@@ -9,7 +9,7 @@ import java.nio.ByteOrder
  * Minimal WAV file writer for 16-bit signed PCM mono audio.
  *
  * Pipes:
- *   FloatArray  ([-1, 1])  -->  PCM Int16  -->  file:///cache/.../*.wav
+ *   FloatArray  ([-1, 1])  -->  PCM Int16  -->  WAV file (in cache dir)
  *
  * Why 16-bit Int instead of 32-bit Float? ExoPlayer (the audio backend
  * react-native-track-player uses under the hood on Android) supports
