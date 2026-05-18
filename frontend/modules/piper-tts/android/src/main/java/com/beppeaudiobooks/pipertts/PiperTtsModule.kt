@@ -14,8 +14,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
+import java.io.InputStreamReader
 import java.util.concurrent.atomic.AtomicReference
+import java.util.zip.GZIPInputStream
 
 /**
  * Native module exposed to React Native as `NativeModules.TTSManager`.
@@ -94,6 +97,22 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
           "'${voice.espeakVoice}' (not Italian). Rebuild with -PwithNativePhonemizer=true.")
     }
 
+    // PATCH (beppe-audiobooks v10): load the bundled Italian word->IPA
+    // dictionary (built offline by running real espeak-ng on the 50k
+    // most-frequent Italian words). Coverage ~95-99% of audiobook text;
+    // remaining ~1-5% (proper nouns, neologisms, foreign words) fall
+    // through to the rule-based phonemizer. Loaded only when the active
+    // voice's espeakVoice == "it"; cached as a static field.
+    if (voice.espeakVoice == "it") {
+      try {
+        val dict = loadItalianDictionary()
+        ItalianPhonemizer.setDictionary(dict)
+        Log.i(TAG, "Italian phonemes dictionary loaded: ${dict.size} entries")
+      } catch (e: Throwable) {
+        Log.w(TAG, "Italian dictionary load failed: ${e.message}; using rule-based only")
+      }
+    }
+
     // Build ORT session
     val previous = engineRef.getAndSet(null)
     previous?.close()
@@ -112,6 +131,7 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
       putInt("numSymbols", voice.numSymbols)
       putString("espeakVoice", voice.espeakVoice)
       putBoolean("nativePhonemizer", nativePhonemizerReady)
+      putInt("phonemesDictSize", ItalianPhonemizer.dictionarySize())
     }
     Log.i(TAG, "doLoadVoice OK (nativePhonemizer=$nativePhonemizerReady)")
     return out
@@ -283,10 +303,35 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
     return dir
   }
 
+  /**
+   * Load the Italian word -> IPA dictionary bundled as an Android asset
+   * (gzipped JSON, ~480KB on disk, ~1.2MB uncompressed, ~49.6k entries).
+   * Built offline by running real espeak-ng on a frequency-sorted list
+   * of the top 50k Italian words.
+   *
+   * Returns a plain Map ready to be handed to ItalianPhonemizer.
+   * Throws if the asset cannot be opened or the JSON is malformed.
+   */
+  private fun loadItalianDictionary(): Map<String, String> {
+    val assets = reactContext.assets
+    val raw = assets.open("it_phonemes.json.gz")
+    val reader = InputStreamReader(GZIPInputStream(raw), Charsets.UTF_8)
+    val json = reader.use { it.readText() }
+    val obj = JSONObject(json)
+    val out = HashMap<String, String>(obj.length() + 16, 0.85f)
+    val keys = obj.keys()
+    while (keys.hasNext()) {
+      val k = keys.next()
+      val v = obj.optString(k, "")
+      if (v.isNotEmpty()) out[k] = v
+    }
+    return out
+  }
+
   companion object {
     private const val TAG = "PiperTtsModule"
 
-    /** Helper if we ever need to push events back to JS \u2014 currently unused. */
+    /** Helper if we ever need to push events back to JS — currently unused. */
     fun emit(reactContext: ReactApplicationContext, eventName: String, params: com.facebook.react.bridge.WritableMap) {
       reactContext
         .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)

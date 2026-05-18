@@ -52,8 +52,23 @@ object ItalianPhonemizer {
   private const val IPA_LENGTH   = "\u02D0" // ː length marker (geminate)
   private const val IPA_STRESS   = "\u02C8" // ˈ primary stress marker
 
-  // Plain Italian vowels (input alphabet).
-  private val PLAIN_VOWELS = charArrayOf('a', 'e', 'i', 'o', 'u')
+  // Optional word -> IPA dictionary loaded once at engine init. Built
+  // offline by running real espeak-ng on a frequency-sorted list of the
+  // top ~50k Italian words; ships as Android asset `it_phonemes.json.gz`.
+  // Coverage: ~95-99% of typical Italian audiobook text. Words not in
+  // the dictionary fall through to the rule-based engine below, which
+  // gets stress + glides + intervocalic-s right but mispredicts open/
+  // close 'e'/'o' on a small minority of cases.
+  @Volatile
+  private var dictionary: Map<String, String> = emptyMap()
+
+  /** Load the bundled word→IPA dictionary. Idempotent. */
+  fun setDictionary(dict: Map<String, String>) {
+    dictionary = dict
+  }
+
+  /** Diagnostic helper. */
+  fun dictionarySize(): Int = dictionary.size
 
   // Front vowels that trigger c/g palatalization.
   private val FRONT_VOWELS = charArrayOf('e', 'i', '\u00E8', '\u00E9', '\u00EC', '\u00ED')
@@ -141,7 +156,18 @@ object ItalianPhonemizer {
       }
       val word = text.substring(i, end).lowercase()
       if (word.isNotEmpty()) {
-        out.append(phonemizeWord(word))
+        // DICTIONARY LOOKUP — preferred path. Uses real espeak-ng IPA
+        // (with proper open/close vowels, correct sdrucciole stress,
+        // proper geminate handling, etc.). Coverage: ~95-99% of common
+        // Italian audiobook vocabulary.
+        val dictIpa = dictionary[word]
+        if (dictIpa != null) {
+          out.append(dictIpa)
+        } else {
+          // FALLBACK — rule-based. Handles stress + glides + intervocalic
+          // -s but mispredicts some open/close vowels and sdrucciole.
+          out.append(phonemizeWord(word))
+        }
       }
       i = end
     }
