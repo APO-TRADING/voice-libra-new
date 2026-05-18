@@ -316,8 +316,100 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: |
-      v6.9 — UPGRADE sherpa-onnx 1.12.26 → 1.13.2 (chirurgico, nessun
-      altro file toccato).
+      v12.0 — MULTI-LANGUAGE DICTIONARIES + DYNAMIC VOICE IMPORT.
+
+      Two parallel improvements requested by user:
+      1) Generate pre-computed espeak-ng IPA dictionaries for EN/ES/FR/DE
+         so Piper can speak those languages without compiling espeak-ng
+         via NDK.
+      2) Allow users to import custom Piper voices (.onnx + .onnx.json
+         pair, or .zip archive) directly from the device's UI, no
+         APK rebuild needed.
+
+      WHAT'S DONE (this iteration):
+
+      Native module (modules/piper-tts/):
+      • Multi-language phoneme dictionaries are now bundled as Android
+        assets (created in a previous session, ~50k entries each):
+          it_phonemes.json.gz   (480 KB, 49.6k entries)
+          en_phonemes.json.gz   (492 KB, 49.7k entries)
+          es_phonemes.json.gz   (485 KB, 50.0k entries)
+          fr_phonemes.json.gz   (470 KB, 49.9k entries)
+          de_phonemes.json.gz   (545 KB, 50.0k entries)
+        Total bundle cost: ~2.4 MB compressed → ~6 MB after install.
+      • ItalianPhonemizer.kt: setDictionary(dict, langCode) — the
+        dictionary is now language-tagged. OOV fallback is language-
+        aware: "it" uses the rule-based Italian phonemizer; other
+        languages emit raw lowercase letters which Piper's
+        phoneme_id_map silently drops (better than emitting wrong
+        Italian phonemes).
+      • PiperTtsModule.kt: loadPhonemeDictionary(baseLang) +
+        baseLangFromEspeak() helper. Normalizes "en-us" -> "en",
+        "es-419" -> "es", etc., then loads the matching .gz asset.
+        The voice rejection check is now "no native phonemizer AND
+        no dictionary AND not Italian" instead of "not Italian".
+      • PiperTtsModule.kt: success metadata now includes
+        phonemesDictLang + phonemesDictSize so JS can show which
+        dictionary is in use during diagnostics.
+
+      JS layer:
+      • NEW src/audio/dynamicVoices.ts (~280 lines):
+          - listDynamicVoices() / getDynamicVoice(id) — reads from
+            AsyncStorage manifest @piper/dynamic_voices_manifest_v1.
+          - importVoice() — uses expo-document-picker to let users
+            pick either a .zip (which we extract via fflate) or two
+            files (.onnx + .onnx.json) together. Validates the JSON
+            sidecar (phoneme_id_map mandatory), generates a stable
+            voice id, copies the files into
+            FileSystem.documentDirectory/piper/dynamic_voices/<id>/.
+          - deleteDynamicVoice(id) — removes both manifest entry and
+            on-disk files.
+          - Hard cap of 250MB per model to prevent accidental imports
+            of giant files.
+      • piperEngine.ts:
+          - listAllVoices() async function — bundled + dynamic.
+          - getCurrentVoiceId / setCurrentVoiceId now accept dynamic
+            voice IDs (looked up in the manifest).
+          - doInitEngine branches: bundled → copyVoiceAsset(); dynamic
+            → use FileSystem path directly + read sidecar text.
+          - runFullDiagnostics() now reports bundled + dynamic voices
+            with [bundled]/[dynamic] tags.
+      • settings.tsx:
+          - "Importa voce..." button at top of VOCE section (themed
+            primary color, with loading spinner).
+          - Dynamic voices show a "PERSONALE/CUSTOM" badge inline.
+          - Per-voice trash icon for dynamic voices (with
+            confirmation dialog).
+          - If user deletes the currently-active voice, the engine
+            automatically falls back to the default bundled voice
+            (Riccardo) before the delete completes.
+      • i18n: 10 new keys in voice.import.* namespace, fully
+        translated for IT, EN, ES, DE, FR.
+
+      VERIFICATION DONE:
+      • tsc --noEmit: 0 errors (was 0 before, still 0).
+      • Metro bundle: 3056 modules in 6.0s, no warnings.
+      • Web preview renders correctly — VOCE section shows
+        "Import voice…" button + hint text + bundled voices below.
+
+      USER ACTION REQUIRED:
+      1. Rebuild via `eas build --platform android --profile preview`
+         to get the new Kotlin multi-language dictionary loader and
+         the file-picker bridge.
+      2. Open the app on a phone, go to Impostazioni → VOCE, tap
+         "Importa voce…". Pick either a .zip containing model.onnx +
+         model.onnx.json, OR both files together.
+      3. The new voice should appear in the list with a PERSONALE
+         badge. Tap it to activate, then hit "Prova" to test.
+      4. The bundled Riccardo voice still works as before. Beppe
+         placeholder shows up but won't load until user drops a
+         real model.onnx into assets/piper/voices/beppe/.
+
+      DEFERRED / FUTURE:
+      • Sleep timer (P2)
+      • Export book to MP3 in background (P3)
+      • Riccardo voice load bug (intentionally skipped — user asked
+        to defer until they share the comparison JSON).
 
       USER CONTEXT: il modello beppe.onnx (Piper 2.10) FP32 crasha
       consistentemente in init.5d.OfflineTts.new (SIGSEGV hard, non

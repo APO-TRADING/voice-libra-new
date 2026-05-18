@@ -112,6 +112,18 @@ export const de: TranslationDict = {
   'settings.language.label': 'App-Sprache',
   'settings.language.system': 'Systemsprache',
 
+  // Voice import
+  'voice.import.button': 'Stimme importieren…',
+  'voice.import.hint': 'Lade eine .zip-Datei mit model.onnx und model.onnx.json hoch oder wähle beide Dateien zusammen aus dem Picker.',
+  'voice.import.inProgress': 'Importiere…',
+  'voice.import.success.title': 'Stimme importiert',
+  'voice.import.success.body': '"{name}" ist nun in der Liste verfügbar.',
+  'voice.import.failed.title': 'Import fehlgeschlagen',
+  'voice.import.delete.confirmTitle': 'Stimme löschen',
+  'voice.import.delete.confirmBody': 'Die Stimme "{name}" löschen? Sie belegt {size} MB auf diesem Gerät.',
+  'voice.import.delete.button': 'Löschen',
+  'voice.import.dynamic.badge': 'BENUTZER',
+
   'error.bookNotFound': 'Buch nicht gefunden',
   'error.contentMissing': 'Buchinhalt fehlt',
   'error.empty': 'Dokument ist nach der Bereinigung leer',

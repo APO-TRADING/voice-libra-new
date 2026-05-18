@@ -112,6 +112,18 @@ export const fr: TranslationDict = {
   'settings.language.label': 'Langue de l\'app',
   'settings.language.system': 'Langue du système',
 
+  // Voice import
+  'voice.import.button': 'Importer une voix…',
+  'voice.import.hint': 'Charge un fichier .zip contenant model.onnx et model.onnx.json, ou sélectionne les deux fichiers ensemble depuis le picker.',
+  'voice.import.inProgress': 'Importation…',
+  'voice.import.success.title': 'Voix importée',
+  'voice.import.success.body': '« {name} » est maintenant disponible dans la liste.',
+  'voice.import.failed.title': 'Échec de l\'importation',
+  'voice.import.delete.confirmTitle': 'Supprimer la voix',
+  'voice.import.delete.confirmBody': 'Supprimer la voix « {name} » ? Elle occupe {size} Mo sur cet appareil.',
+  'voice.import.delete.button': 'Supprimer',
+  'voice.import.dynamic.badge': 'PERSONNALISÉE',
+
   'error.bookNotFound': 'Livre introuvable',
   'error.contentMissing': 'Contenu du livre manquant',
   'error.empty': 'Document vide après nettoyage',

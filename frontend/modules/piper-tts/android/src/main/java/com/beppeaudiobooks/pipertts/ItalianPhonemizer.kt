@@ -58,17 +58,27 @@ object ItalianPhonemizer {
   // language (it, en, es, fr, de). Coverage: ~95-99% of typical
   // audiobook text. Words not in the dictionary fall through to the
   // rule-based engine below FOR ITALIAN ONLY; for other languages,
-  // OOV words are silently skipped (which means a small audible gap
-  // but no garbled phonemes).
+  // OOV words are emitted as raw lowercase letters which Piper's
+  // phoneme_id_map will silently drop (the dictionary normally covers
+  // all common words so OOVs are rare proper nouns).
   @Volatile
   private var dictionary: Map<String, String> = emptyMap()
   @Volatile
-  private var currentLang: String = ""
+  private var currentLang: String = "it"
 
-  /** Load the bundled word→IPA dictionary for a given base language. */
+  /**
+   * Load the bundled word→IPA dictionary for a given base language.
+   * `langCode` must be the BASE language code ("it", "en", "es", "fr", "de")
+   * — espeak variants like "en-us" must be normalized to "en" by the caller.
+   */
   fun setDictionary(dict: Map<String, String>, langCode: String) {
     dictionary = dict
     currentLang = langCode.lowercase()
+  }
+
+  /** Backward-compat overload — assumes Italian. */
+  fun setDictionary(dict: Map<String, String>) {
+    setDictionary(dict, "it")
   }
 
   /** Diagnostic helpers. */
@@ -164,14 +174,29 @@ object ItalianPhonemizer {
         // DICTIONARY LOOKUP — preferred path. Uses real espeak-ng IPA
         // (with proper open/close vowels, correct sdrucciole stress,
         // proper geminate handling, etc.). Coverage: ~95-99% of common
-        // Italian audiobook vocabulary.
+        // audiobook vocabulary for each supported language.
         val dictIpa = dictionary[word]
         if (dictIpa != null) {
           out.append(dictIpa)
         } else {
-          // FALLBACK — rule-based. Handles stress + glides + intervocalic
-          // -s but mispredicts some open/close vowels and sdrucciole.
-          out.append(phonemizeWord(word))
+          // OOV FALLBACK — language-aware:
+          //   • Italian (or empty): use the rule-based phonemizer below,
+          //     which handles stress/glides/intervocalic-s. Good fallback
+          //     for ~85-90% native quality on Italian OOV words.
+          //   • Non-Italian: emit the word as raw lowercase ASCII letters.
+          //     Piper's phoneme_id_map will silently drop the unmapped
+          //     characters (Latin letters aren't valid IPA glyphs), which
+          //     produces a brief silence in place of the unknown word.
+          //     Since the per-language dictionary covers ~99% of common
+          //     audiobook vocabulary, OOV gaps are rare (proper nouns,
+          //     neologisms, foreign-language words).
+          if (currentLang == "it" || currentLang.isEmpty()) {
+            out.append(phonemizeWord(word))
+          } else {
+            // Strip diacritics and emit ASCII letters - the unmapped chars
+            // will be silently dropped by VoiceConfig.textToInputIds().
+            out.append(word)
+          }
         }
       }
       i = end

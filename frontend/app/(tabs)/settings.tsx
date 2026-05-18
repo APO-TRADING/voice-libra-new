@@ -1,5 +1,5 @@
 import Slider from '@react-native-community/slider';
-import { AlertCircle, AlertTriangle, Check, Copy, Cpu, Mic, Moon, Play, RefreshCw, Sun, X, Volume2 } from 'lucide-react-native';
+import { AlertCircle, AlertTriangle, Check, Copy, Cpu, Mic, Moon, Play, Plus, RefreshCw, Sun, Trash2, X, Volume2 } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Clipboard, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -10,6 +10,7 @@ import {
   getCurrentVoiceId,
   initEngine,
   isPiperReady,
+  listAllVoices,
   listVoices,
   readPiperTrace,
   reloadEngine,
@@ -18,6 +19,12 @@ import {
   speakSentence,
 } from '../../src/audio/piperEngine';
 import type { VoiceMeta } from '../../src/audio/piperAssets';
+import {
+  deleteDynamicVoice,
+  importVoice,
+  listDynamicVoices,
+  type DynamicVoiceMeta,
+} from '../../src/audio/dynamicVoices';
 import { usePlayer } from '../../src/contexts/PlayerContext';
 import { useTheme } from '../../src/contexts/ThemeContext';
 import { SUPPORTED_LOCALES, SYSTEM, useI18n, useT } from '../../src/i18n';
@@ -32,18 +39,38 @@ export default function SettingsScreen() {
   const [diagResults, setDiagResults] = useState<DiagnosticItem[] | null>(null);
   const [diagRunning, setDiagRunning] = useState(false);
   // ----- Voice picker state -----
-  const [voices] = useState<VoiceMeta[]>(() => listVoices());
+  const [voices, setVoices] = useState<VoiceMeta[]>(() => listVoices());
+  const [dynamicVoiceIds, setDynamicVoiceIds] = useState<Set<string>>(new Set());
   const [activeVoiceId, setActiveVoiceId] = useState<string>(voices[0]?.id ?? 'riccardo');
   const [voiceSwitching, setVoiceSwitching] = useState(false);
   const [testRunning, setTestRunning] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   const activeVoiceMeta = voices.find((v) => v.id === activeVoiceId) || null;
+
+  // Refresh the voice catalog (bundled + dynamic). Called on mount and
+  // after each import/delete to keep the picker in sync.
+  const refreshVoiceCatalog = useCallback(async () => {
+    try {
+      const all = await listAllVoices();
+      const dynIds = new Set<string>();
+      for (const v of all) {
+        if ((v as Partial<DynamicVoiceMeta>).isDynamic) dynIds.add(v.id);
+      }
+      setVoices(all);
+      setDynamicVoiceIds(dynIds);
+    } catch (e: any) {
+      // eslint-disable-next-line no-console
+      console.warn('[Settings] refreshVoiceCatalog failed', e);
+    }
+  }, []);
 
   useEffect(() => {
     (async () => {
       try { setActiveVoiceId(await getCurrentVoiceId()); } catch { /* ignore */ }
+      await refreshVoiceCatalog();
     })();
-  }, []);
+  }, [refreshVoiceCatalog]);
 
   const refreshTrace = useCallback(async () => {
     const t = await readPiperTrace();
@@ -89,6 +116,62 @@ export default function SettingsScreen() {
       refreshTrace();
     }
   }, [testRunning, activeVoiceMeta, refreshTrace]);
+
+  // ───── Import a new voice from device storage ──────────────────────
+  const handleImportVoice = useCallback(async () => {
+    if (importing) return;
+    setImporting(true);
+    try {
+      const imported = await importVoice();
+      if (!imported) return; // user canceled
+      await refreshVoiceCatalog();
+      Alert.alert(
+        t('voice.import.success.title'),
+        t('voice.import.success.body', { name: imported.name }),
+      );
+    } catch (e: any) {
+      Alert.alert(
+        t('voice.import.failed.title'),
+        String(e?.message || e),
+      );
+    } finally {
+      setImporting(false);
+      refreshTrace();
+    }
+  }, [importing, refreshTrace, refreshVoiceCatalog, t]);
+
+  // ───── Delete a dynamic voice ──────────────────────────────────────
+  const handleDeleteDynamicVoice = useCallback(async (voice: VoiceMeta) => {
+    Alert.alert(
+      t('voice.import.delete.confirmTitle'),
+      t('voice.import.delete.confirmBody', { name: voice.name, size: voice.size_mb || '?' }),
+      [
+        { text: t('common.cancel'), style: 'cancel' },
+        {
+          text: t('voice.import.delete.button'),
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              // If the user is deleting the currently-active voice, fall back
+              // to the default bundled voice first.
+              if (activeVoiceId === voice.id) {
+                const bundled = listVoices();
+                const fallback = bundled[0]?.id;
+                if (fallback) {
+                  await setCurrentVoiceId(fallback);
+                  setActiveVoiceId(fallback);
+                }
+              }
+              await deleteDynamicVoice(voice.id);
+              await refreshVoiceCatalog();
+            } catch (e: any) {
+              Alert.alert(t('common.error'), String(e?.message || e));
+            }
+          },
+        },
+      ],
+    );
+  }, [t, activeVoiceId, refreshVoiceCatalog]);
 
   useEffect(() => { refreshTrace(); }, [refreshTrace]);
 
@@ -245,8 +328,36 @@ export default function SettingsScreen() {
         <Text style={[styles.rowMeta, { color: colors.textSecondary, paddingHorizontal: 4, marginBottom: 8 }]}>
           {voiceSwitching
             ? 'Cambio voce in corso...'
-            : 'Seleziona la voce Piper da usare per la lettura. Le voci aggiuntive si caricano dalla cartella assets/piper/voices/.'}
+            : 'Seleziona la voce Piper da usare per la lettura. Le voci aggiuntive si caricano dalla cartella assets/piper/voices/ oppure importandone una nuova.'}
         </Text>
+
+        {/* ── Import dynamic voice button ── */}
+        <TouchableOpacity
+          testID="import-voice-button"
+          onPress={handleImportVoice}
+          disabled={importing || voiceSwitching}
+          style={[
+            styles.importBtn,
+            {
+              borderColor: colors.primaryActive,
+              backgroundColor: colors.primaryActive + '15',
+              opacity: (importing || voiceSwitching) ? 0.6 : 1,
+            },
+          ]}
+        >
+          {importing ? (
+            <ActivityIndicator size="small" color={colors.primaryActive} />
+          ) : (
+            <Plus color={colors.primaryActive} size={18} />
+          )}
+          <Text style={[styles.importBtnLabel, { color: colors.primaryActive }]}>
+            {importing ? t('voice.import.inProgress') : t('voice.import.button')}
+          </Text>
+        </TouchableOpacity>
+        <Text style={[styles.rowMeta, { color: colors.textSecondary, paddingHorizontal: 4, marginTop: 4, marginBottom: 12, lineHeight: 16 }]}>
+          {t('voice.import.hint')}
+        </Text>
+
         {voices.length === 0 ? (
           <View style={{ paddingVertical: 12, alignItems: 'center' }}>
             <AlertCircle color={colors.textSecondary} size={16} />
@@ -255,6 +366,7 @@ export default function SettingsScreen() {
         ) : (
           voices.map((v) => {
             const selected = v.id === activeVoiceId;
+            const isDynamic = dynamicVoiceIds.has(v.id);
             return (
               <TouchableOpacity
                 key={v.id}
@@ -276,6 +388,13 @@ export default function SettingsScreen() {
                     <Text style={{ color: colors.textPrimary, fontSize: 15, fontWeight: '700' }}>
                       {v.name}
                     </Text>
+                    {isDynamic && (
+                      <View style={[styles.dynamicBadge, { backgroundColor: colors.primaryActive + '30', borderColor: colors.primaryActive }]}>
+                        <Text style={[styles.dynamicBadgeText, { color: colors.primaryActive }]}>
+                          {t('voice.import.dynamic.badge')}
+                        </Text>
+                      </View>
+                    )}
                   </View>
                   <Text style={{ color: colors.textSecondary, fontSize: 11, marginTop: 3 }}>
                     {v.language} · {v.quality} · ~{v.size_mb} MB
@@ -284,7 +403,17 @@ export default function SettingsScreen() {
                     {v.description}
                   </Text>
                 </View>
-                <View style={{ width: 28, alignItems: 'center' }}>
+                <View style={{ width: isDynamic ? 56 : 28, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 4 }}>
+                  {isDynamic && (
+                    <TouchableOpacity
+                      testID={`voice-delete-${v.id}`}
+                      onPress={() => handleDeleteDynamicVoice(v)}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      style={styles.voiceDeleteBtn}
+                    >
+                      <Trash2 color="#ef4444" size={16} />
+                    </TouchableOpacity>
+                  )}
                   {selected && voiceSwitching ? (
                     <ActivityIndicator size="small" color={colors.primaryActive} />
                   ) : selected ? (
@@ -552,4 +681,33 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   testVoiceLabel: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  importBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    height: 48,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    marginBottom: 4,
+  },
+  importBtnLabel: { fontSize: 15, fontWeight: '700' },
+  voiceDeleteBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dynamicBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  dynamicBadgeText: {
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+  },
 });

@@ -121,6 +121,18 @@ export const it = {
   'settings.language.label': 'Lingua dell\'app',
   'settings.language.system': 'Lingua del sistema',
 
+  // Voice import
+  'voice.import.button': 'Importa voce…',
+  'voice.import.hint': 'Carica un file .zip che contiene model.onnx e model.onnx.json, oppure seleziona entrambi i file insieme dal picker.',
+  'voice.import.inProgress': 'Importazione…',
+  'voice.import.success.title': 'Voce importata',
+  'voice.import.success.body': '"{name}" è ora disponibile nella lista.',
+  'voice.import.failed.title': 'Importazione fallita',
+  'voice.import.delete.confirmTitle': 'Elimina voce',
+  'voice.import.delete.confirmBody': 'Eliminare la voce "{name}"? Il file occupa {size} MB sul dispositivo.',
+  'voice.import.delete.button': 'Elimina',
+  'voice.import.dynamic.badge': 'PERSONALE',
+
   // Errors
   'error.bookNotFound': 'Libro non trovato',
   'error.contentMissing': 'Contenuto libro mancante',

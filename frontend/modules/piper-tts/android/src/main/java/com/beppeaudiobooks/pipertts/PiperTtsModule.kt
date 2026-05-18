@@ -72,7 +72,8 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
     val voice = withContext(Dispatchers.Default) { VoiceConfig.fromJson(configJson) }
     Log.i(TAG, "voice: sr=${voice.sampleRate} lang=${voice.languageCode} phonemes=${voice.phonemeIdMap.size} speakers=${voice.numSpeakers}")
 
-    // Phonemizer init (best effort: NDK espeak-ng, fallback to Italian rules)
+    // Phonemizer init (best effort: NDK espeak-ng, fallback to Kotlin
+    // dictionary + Italian rule-based fallback for OOV).
     nativePhonemizerReady = false
     try {
       PhonemizerNative.ensureLoaded()
@@ -83,34 +84,52 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
           nativePhonemizerReady = true
           Log.i(TAG, "espeak-ng phonemizer ready for voice=${voice.espeakVoice}")
         } else {
-          Log.w(TAG, "espeak nativeSetVoice(${voice.espeakVoice}) -> $voiceErr; falling back to Italian Kotlin phonemizer")
+          Log.w(TAG, "espeak nativeSetVoice(${voice.espeakVoice}) -> $voiceErr; falling back to dictionary phonemizer")
         }
       } else {
-        Log.w(TAG, "espeak nativeInit -> $initErr; falling back to Italian Kotlin phonemizer")
+        Log.w(TAG, "espeak nativeInit -> $initErr; falling back to dictionary phonemizer")
       }
     } catch (e: Throwable) {
-      Log.w(TAG, "espeak-ng JNI bridge unavailable: ${e.message}; will use Italian fallback if voice is 'it'")
-    }
-    if (!nativePhonemizerReady && voice.espeakVoice != "it") {
-      throw RuntimeException(
-        "Native espeak-ng phonemizer unavailable AND voice language is " +
-          "'${voice.espeakVoice}' (not Italian). Rebuild with -PwithNativePhonemizer=true.")
+      Log.w(TAG, "espeak-ng JNI bridge unavailable: ${e.message}; falling back to dictionary phonemizer")
     }
 
-    // PATCH (beppe-audiobooks v10): load the bundled Italian word->IPA
-    // dictionary (built offline by running real espeak-ng on the 50k
-    // most-frequent Italian words). Coverage ~95-99% of audiobook text;
-    // remaining ~1-5% (proper nouns, neologisms, foreign words) fall
-    // through to the rule-based phonemizer. Loaded only when the active
-    // voice's espeakVoice == "it"; cached as a static field.
-    if (voice.espeakVoice == "it") {
+    // PATCH (beppe-audiobooks v11): MULTI-LANGUAGE word -> IPA dictionaries.
+    // Each supported language ships a pre-computed json.gz built offline by
+    // running real espeak-ng on the 50k most-frequent words for that
+    // language. Coverage ~95-99% of typical audiobook text per language.
+    // The remaining ~1-5% (proper nouns, neologisms, foreign words) fall
+    // through to the Italian rule-based phonemizer for italian voices,
+    // and to a silent pass-through for other languages.
+    //
+    // Supported asset files in android/src/main/assets/:
+    //   it_phonemes.json.gz, en_phonemes.json.gz, es_phonemes.json.gz,
+    //   fr_phonemes.json.gz, de_phonemes.json.gz
+    var dictLoaded = false
+    val baseLang = baseLangFromEspeak(voice.espeakVoice)
+    if (!nativePhonemizerReady) {
       try {
-        val dict = loadItalianDictionary()
-        ItalianPhonemizer.setDictionary(dict)
-        Log.i(TAG, "Italian phonemes dictionary loaded: ${dict.size} entries")
+        val dict = loadPhonemeDictionary(baseLang)
+        if (dict.isNotEmpty()) {
+          ItalianPhonemizer.setDictionary(dict, baseLang)
+          dictLoaded = true
+          Log.i(TAG, "$baseLang phonemes dictionary loaded: ${dict.size} entries")
+        } else {
+          Log.w(TAG, "No phoneme dictionary bundled for language '$baseLang' (espeak=${voice.espeakVoice})")
+        }
       } catch (e: Throwable) {
-        Log.w(TAG, "Italian dictionary load failed: ${e.message}; using rule-based only")
+        Log.w(TAG, "Dictionary load failed for $baseLang: ${e.message}; relying on rule-based fallback")
       }
+    }
+
+    // If neither native phonemizer nor dictionary nor Italian rule-based
+    // fallback can handle this voice, abort early so the UI can show a
+    // clear error rather than producing garbled speech.
+    if (!nativePhonemizerReady && !dictLoaded && baseLang != "it") {
+      throw RuntimeException(
+        "No phonemizer available for language '$baseLang' " +
+          "(espeak='${voice.espeakVoice}'). " +
+          "Bundle a $baseLang dictionary or rebuild with " +
+          "-PwithNativePhonemizer=true to enable native espeak-ng.")
     }
 
     // Build ORT session
@@ -132,8 +151,9 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
       putString("espeakVoice", voice.espeakVoice)
       putBoolean("nativePhonemizer", nativePhonemizerReady)
       putInt("phonemesDictSize", ItalianPhonemizer.dictionarySize())
+      putString("phonemesDictLang", ItalianPhonemizer.dictionaryLanguage())
     }
-    Log.i(TAG, "doLoadVoice OK (nativePhonemizer=$nativePhonemizerReady)")
+    Log.i(TAG, "doLoadVoice OK (nativePhonemizer=$nativePhonemizerReady dictLang=${ItalianPhonemizer.dictionaryLanguage()} dictSize=${ItalianPhonemizer.dictionarySize()})")
     return out
   }
 
@@ -304,17 +324,62 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
   }
 
   /**
-   * Load the Italian word -> IPA dictionary bundled as an Android asset
-   * (gzipped JSON, ~480KB on disk, ~1.2MB uncompressed, ~49.6k entries).
-   * Built offline by running real espeak-ng on a frequency-sorted list
-   * of the top 50k Italian words.
+   * Normalize an espeak-ng voice code to its BASE language code (the
+   * filename prefix of our bundled phoneme dictionaries).
    *
-   * Returns a plain Map ready to be handed to ItalianPhonemizer.
-   * Throws if the asset cannot be opened or the JSON is malformed.
+   * Examples:
+   *   "it"      -> "it"
+   *   "en-us"   -> "en"
+   *   "en-gb"   -> "en"
+   *   "es-419"  -> "es"
+   *   "fr-fr"   -> "fr"
+   *   "de"      -> "de"
+   *
+   * Unknown codes are returned lower-cased without the dash suffix; if no
+   * matching <base>_phonemes.json.gz exists, loadPhonemeDictionary will
+   * return an empty map and the caller falls back to Italian-rule-based
+   * or rejects (depending on policy).
    */
-  private fun loadItalianDictionary(): Map<String, String> {
+  private fun baseLangFromEspeak(espeakVoice: String): String {
+    val v = espeakVoice.lowercase().trim()
+    if (v.isEmpty()) return "it" // safety default
+    return v.substringBefore('-').substringBefore('_')
+  }
+
+  /**
+   * Load a word -> IPA dictionary bundled as an Android asset
+   * (gzipped JSON). Each language ships ~50k entries (~470-540KB on disk,
+   * ~1.2MB uncompressed) built offline by running real espeak-ng on a
+   * frequency-sorted list of the top 50k words for that language.
+   *
+   * Asset naming convention: <baseLang>_phonemes.json.gz
+   *   it_phonemes.json.gz   (49.6k entries)
+   *   en_phonemes.json.gz   (49.7k entries)
+   *   es_phonemes.json.gz   (50.0k entries)
+   *   fr_phonemes.json.gz   (49.9k entries)
+   *   de_phonemes.json.gz   (50.0k entries)
+   *
+   * Returns an empty Map if the asset is not bundled (callers should
+   * decide whether to error out or fall back to the rule-based engine).
+   * Throws if the asset is present but malformed.
+   */
+  private fun loadPhonemeDictionary(baseLang: String): Map<String, String> {
+    val assetName = "${baseLang}_phonemes.json.gz"
     val assets = reactContext.assets
-    val raw = assets.open("it_phonemes.json.gz")
+    // Check existence without throwing — assets.open() raises IOException
+    // for missing files which we want to convert to "empty map".
+    val available = try {
+      val all = assets.list("") ?: emptyArray()
+      all.contains(assetName)
+    } catch (e: Throwable) {
+      false
+    }
+    if (!available) {
+      Log.w(TAG, "Phoneme dictionary asset not bundled: $assetName")
+      return emptyMap()
+    }
+
+    val raw = assets.open(assetName)
     val reader = InputStreamReader(GZIPInputStream(raw), Charsets.UTF_8)
     val json = reader.use { it.readText() }
     val obj = JSONObject(json)
@@ -327,6 +392,13 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
     }
     return out
   }
+
+  /**
+   * Italian-only convenience wrapper (kept for backward compatibility with
+   * code that explicitly requests Italian).
+   */
+  @Suppress("unused")
+  private fun loadItalianDictionary(): Map<String, String> = loadPhonemeDictionary("it")
 
   companion object {
     private const val TAG = "PiperTtsModule"

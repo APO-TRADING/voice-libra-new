@@ -32,6 +32,11 @@ import {
   VOICES_MANIFEST,
   type VoiceMeta,
 } from './piperAssets';
+import {
+  getDynamicVoice,
+  listDynamicVoices,
+  type DynamicVoiceMeta,
+} from './dynamicVoices';
 import { getPiperNative, isPiperAvailable } from './piperBridge';
 
 const VOICES_DIR = `${FileSystem.documentDirectory}piper/voices`;
@@ -200,24 +205,47 @@ export function tracePiper(step: string, info: string = ''): void {
 // VOICE CATALOG
 // =========================================================================
 
+/** Bundled voices only (sync). */
 export function listVoices(): VoiceMeta[] {
   // Only return voices whose assets are actually bundled.
   return VOICES_MANIFEST.voices.filter((v) => !!PIPER_VOICES[v.id]);
 }
 
+/**
+ * Full voice catalog: bundled + user-imported (dynamic). Async because
+ * dynamic voices live on disk and require a manifest read.
+ */
+export async function listAllVoices(): Promise<VoiceMeta[]> {
+  const bundled = listVoices();
+  const dynamic = await listDynamicVoices();
+  return [...bundled, ...dynamic];
+}
+
 export async function getCurrentVoiceId(): Promise<string> {
   try {
     const stored = await AsyncStorage.getItem(ASYNC_VOICE_KEY);
-    if (stored && PIPER_VOICES[stored]) {
+    if (!stored) return currentVoiceId;
+    // Bundled voice — fast path
+    if (PIPER_VOICES[stored]) {
       currentVoiceId = stored;
+      return currentVoiceId;
     }
+    // Dynamic voice — check the manifest
+    const dyn = await getDynamicVoice(stored);
+    if (dyn) {
+      currentVoiceId = stored;
+      return currentVoiceId;
+    }
+    // Unknown id (voice was deleted) — fall back to default
   } catch { /* ignore */ }
   return currentVoiceId;
 }
 
 export async function setCurrentVoiceId(voiceId: string): Promise<void> {
-  if (!PIPER_VOICES[voiceId]) {
-    throw new Error(`Voice "${voiceId}" not found in PIPER_VOICES map`);
+  const isBundled = !!PIPER_VOICES[voiceId];
+  const dynVoice = isBundled ? null : await getDynamicVoice(voiceId);
+  if (!isBundled && !dynVoice) {
+    throw new Error(`Voice "${voiceId}" not found in PIPER_VOICES map or dynamic voices manifest`);
   }
   await AsyncStorage.setItem(ASYNC_VOICE_KEY, voiceId);
   currentVoiceId = voiceId;
@@ -225,7 +253,7 @@ export async function setCurrentVoiceId(voiceId: string): Promise<void> {
   ready = false;
   loadedVoiceId = null;
   initInFlight = null;
-  await trace('voice.set', `id=${voiceId}`);
+  await trace('voice.set', `id=${voiceId} dynamic=${!!dynVoice}`);
 }
 
 export function getCurrentVoiceMeta(): VoiceMeta | null {
@@ -351,16 +379,24 @@ async function unzipEspeakData(): Promise<string> {
 async function doInitEngine(): Promise<boolean> {
   await getCurrentVoiceId();
   const voiceId = currentVoiceId;
-  const voiceMeta = VOICES_MANIFEST.voices.find((v) => v.id === voiceId);
-  const voiceAsset = PIPER_VOICES[voiceId];
+  // First check bundled voices (sync, fast).
+  let voiceMeta: VoiceMeta | null = VOICES_MANIFEST.voices.find((v) => v.id === voiceId) || null;
+  let voiceAsset = PIPER_VOICES[voiceId] || null;
+  let dynamicVoice: DynamicVoiceMeta | null = null;
   if (!voiceMeta || !voiceAsset) {
+    // Not a bundled voice — try the dynamic voice manifest.
+    dynamicVoice = await getDynamicVoice(voiceId);
+    if (dynamicVoice) voiceMeta = dynamicVoice;
+  }
+  if (!voiceMeta) {
     lastError = `Unknown voice id: ${voiceId}`;
     await trace('init.bad-voice', lastError);
     return false;
   }
   currentVoiceMeta = voiceMeta;
 
-  await trace('==INIT.START==', `voice=${voiceId} (${voiceMeta.name} / ${voiceMeta.language})`);
+  const voiceKind = dynamicVoice ? 'dynamic' : 'bundled';
+  await trace('==INIT.START==', `voice=${voiceId} (${voiceMeta.name} / ${voiceMeta.language}) kind=${voiceKind}`);
   emitProgress('Avvio motore TTS...', 1);
   await logSystemInfo();
 
@@ -381,16 +417,30 @@ async function doInitEngine(): Promise<boolean> {
     const dataDir = await unzipEspeakData();
 
     emitProgress(`Caricamento voce "${voiceMeta.name}"...`, 40, `${voiceMeta.size_mb || '?'} MB`);
-    const voiceDir = `${VOICES_DIR}/${voiceId}`;
-    await ensureDir(voiceDir);
-    const modelPath = `${voiceDir}/model.onnx`;
-    await trace('==PHASE.2==', `copy model -> ${modelPath}`);
-    await copyVoiceAsset(voiceAsset.model, modelPath, `${voiceId}.onnx`);
-    const modelStat: any = await FileSystem.getInfoAsync(modelPath, { size: true } as any);
-    await trace('phase2.done', `size=${modelStat?.size || 0}B`);
 
-    const configJson = JSON.stringify(voiceAsset.config);
-    await trace('phase2.config', `len=${configJson.length}B keys=${Object.keys(voiceAsset.config).join(',')}`);
+    // ─── Resolve the on-disk paths for model + config ──────────────────
+    // Bundled voices: copy from assets to documentDirectory on first use.
+    // Dynamic voices: already on documentDirectory, just reference them.
+    let modelPath: string;
+    let configJson: string;
+    if (dynamicVoice) {
+      modelPath = dynamicVoice.modelPath;
+      const cfgRaw = await FileSystem.readAsStringAsync(dynamicVoice.configPath);
+      configJson = cfgRaw; // pass as-is; native parses with VoiceConfig
+      await trace('==PHASE.2==', `dynamic voice — model=${modelPath} cfgLen=${cfgRaw.length}B`);
+    } else if (voiceAsset) {
+      const voiceDir = `${VOICES_DIR}/${voiceId}`;
+      await ensureDir(voiceDir);
+      modelPath = `${voiceDir}/model.onnx`;
+      await trace('==PHASE.2==', `copy bundled model -> ${modelPath}`);
+      await copyVoiceAsset(voiceAsset.model, modelPath, `${voiceId}.onnx`);
+      configJson = JSON.stringify(voiceAsset.config);
+    } else {
+      throw new Error('Internal error: no voice asset/path resolved');
+    }
+    const modelStat: any = await FileSystem.getInfoAsync(modelPath, { size: true } as any);
+    await trace('phase2.done', `size=${modelStat?.size || 0}B kind=${voiceKind}`);
+    await trace('phase2.config', `len=${configJson.length}B`);
 
     emitProgress('Inizializzazione motore ONNX...', 70, 'Microsoft ONNX Runtime');
     await trace('==PHASE.3==', 'native.loadVoice');
@@ -407,7 +457,9 @@ async function doInitEngine(): Promise<boolean> {
       `sr=${result.sampleRate} lang=${result.languageCode}/${result.languageName} ` +
       `phonemes=${result.numSymbols} speakers=${result.numSpeakers} ` +
       `espeak=${result.espeakVoice} ` +
-      `nativePhonemizer=${(result as any).nativePhonemizer ?? 'unknown'}`);
+      `nativePhonemizer=${(result as any).nativePhonemizer ?? 'unknown'} ` +
+      `dictLang=${(result as any).phonemesDictLang ?? '?'} ` +
+      `dictSize=${(result as any).phonemesDictSize ?? '?'}`);
     emitProgress('Voce pronta!', 100);
     setTimeout(() => emitProgress('', 0), 1500);
     return true;
@@ -695,12 +747,24 @@ export async function runFullDiagnostics(): Promise<DiagnosticItem[]> {
     `TTSManager=${!!native} hasLoad=${typeof native?.loadVoice}`);
 
   const voiceId = await getCurrentVoiceId();
-  await push('CurrentVoice', !!PIPER_VOICES[voiceId], `id=${voiceId}`);
+  const isBundled = !!PIPER_VOICES[voiceId];
+  const dynVoice = isBundled ? null : await getDynamicVoice(voiceId);
+  await push('CurrentVoice', isBundled || !!dynVoice, `id=${voiceId} kind=${isBundled ? 'bundled' : dynVoice ? 'dynamic' : 'unknown'}`);
 
   for (const meta of listVoices()) {
     const has = !!PIPER_VOICES[meta.id];
     await push(`Voice:${meta.id}`, has,
-      `${meta.name} — ${meta.language} ${meta.quality} (~${meta.size_mb}MB)`);
+      `${meta.name} — ${meta.language} ${meta.quality} (~${meta.size_mb}MB) [bundled]`);
+  }
+  const dynamicVoices = await listDynamicVoices();
+  for (const meta of dynamicVoices) {
+    try {
+      const info_ = await FileSystem.getInfoAsync(meta.modelPath);
+      await push(`Voice:${meta.id}`, info_.exists,
+        `${meta.name} — ${meta.language} ${meta.quality} (~${meta.size_mb}MB) [dynamic]`);
+    } catch (e: any) {
+      await push(`Voice:${meta.id}`, false, `${meta.name} — error: ${e?.message || e}`);
+    }
   }
 
   await push('EngineState', true,
