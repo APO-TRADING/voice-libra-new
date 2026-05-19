@@ -124,6 +124,18 @@ export const fr: TranslationDict = {
   'voice.import.delete.button': 'Supprimer',
   'voice.import.dynamic.badge': 'PERSONNALISÉE',
 
+  'settings.tts.section': 'Moteur TTS',
+  'settings.tts.status.ready': 'Piper local actif',
+  'settings.tts.status.ready.desc': 'Inférence locale via Microsoft ONNX Runtime + voix Piper sélectionnée. Aucun serveur, aucune connexion requise.',
+  'settings.tts.status.idle': 'Piper (charge au premier Play)',
+  'settings.tts.status.idle.desc': 'Le moteur Piper s\'initialise au premier Play. Le premier chargement peut prendre 10-30 secondes (extraction des phonèmes).',
+  'settings.tts.status.error': 'Erreur du moteur TTS',
+  'settings.tts.status.error.prefix': 'Erreur d\'initialisation',
+  'settings.tts.status.error.desc': 'Touchez « Vérifier » ci-dessous pour diagnostiquer. La voix du système NE sera PAS utilisée.',
+
+  'settings.nnapi.label': 'Accélérateur IA (NNAPI)',
+  'settings.nnapi.desc': 'Utilise la puce neuronale du téléphone pour accélérer la synthèse. Expérimental — désactivez si l\'audio bafouille ou si le moteur ne démarre pas.',
+
   'error.bookNotFound': 'Livre introuvable',
   'error.contentMissing': 'Contenu du livre manquant',
   'error.empty': 'Document vide après nettoyage',

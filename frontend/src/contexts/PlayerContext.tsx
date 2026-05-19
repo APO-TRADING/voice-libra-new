@@ -1,7 +1,10 @@
 // Singleton on-device audio player.
 // Primary engine: piper-tts local native module (Microsoft ONNX Runtime + Piper VITS).
-// Fallback engine: expo-speech (used in Expo Go preview / when model assets
-// are not yet bundled).
+//
+// IMPORTANT (v2.1): the Android system TTS (expo-speech) fallback has been
+// REMOVED to prevent the device voice from kicking in on pause / speed
+// change events. If Piper synthesis fails the playback stops cleanly and
+// the engine status flips to 'error' so the UI can show a fix-it banner.
 //
 // Pre-buffering: while a sentence is being spoken, the next-sentence
 // synthesis is initiated immediately so playback feels seamless.
@@ -13,7 +16,6 @@
 // play() / pause() actions the on-screen UI triggers.
 //
 // Singleton: any new play() call hard-stops the previous one before starting.
-import * as Speech from 'expo-speech';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { api, BookFull } from '../api/client';
 import {
@@ -41,7 +43,7 @@ type State = {
   index: number;
   isPlaying: boolean;
   lengthScale: number;
-  engine: 'piper' | 'device' | 'unknown';
+  engine: 'piper' | 'error' | 'unknown';
   piperError: string | null;
   piperStep: string;
 };
@@ -68,7 +70,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [index, setIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [lengthScale, setLengthScale] = useState(1.0);
-  const [engine, setEngine] = useState<'piper' | 'device' | 'unknown'>('unknown');
+  const [engine, setEngine] = useState<'piper' | 'error' | 'unknown'>('unknown');
   const [piperError, setPiperError] = useState<string | null>(null);
   const [piperStep, setPiperStep] = useState<string>('idle');
 
@@ -146,73 +148,62 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   const stopAll = useCallback(async () => {
     generationRef.current++;
-    Speech.stop();
     if (isPiperReady()) {
       try { await piperStop(); } catch { /* ignore */ }
     }
   }, []);
 
-  // Speak a single sentence using the active engine. Returns when the audio
-  // playback for that sentence completes (or is aborted).
+  // Speak a single sentence using Piper. If synthesis fails the function
+  // RESOLVES WITHOUT FALLING BACK to the system TTS (per spec — the device
+  // voice must NEVER speak). On failure we just stop the playback loop and
+  // surface the error in the UI via setEngine('error').
   const speakOne = useCallback(async (idx: number, gen: number): Promise<void> => {
     const list = sentencesRef.current;
     if (idx < 0 || idx >= list.length) return;
     const text = list[idx];
     const ls = lengthScaleRef.current;
 
-    if (isPiperReady()) {
-      try {
-        // Lockscreen / notification metadata: ONLY the static book identity
-        // (title + author + voice). Per spec, we never put the running
-        // sentence text on the OS UI — too distracting and changes every
-        // few seconds.
-        const rawCover = coverUrlRef.current;
-        const tpCover =
-          rawCover && (rawCover.startsWith('http://') ||
-                       rawCover.startsWith('https://') ||
-                       rawCover.startsWith('file://'))
-            ? rawCover
-            : null;
-        await piperSpeak(text, ls, {
-          bookTitle: titleRef.current || 'Audiobook',
-          bookAuthor: authorRef.current || '',
-          coverUrl: tpCover,
-        });
-        // PATCH (beppe-audiobooks v5): success → reset fail counter and
-        // promote engine back to 'piper' if we were on 'device' fallback.
-        if (piperFailCountRef.current > 0) {
-          piperFailCountRef.current = 0;
-        }
-        setEngine((prev) => (prev === 'device' ? 'piper' : prev));
-        return;
-      } catch (e) {
-        piperFailCountRef.current += 1;
-        console.warn(
-          `[Piper] speak failed (${piperFailCountRef.current}/${MAX_PIPER_FAILS}), `,
-          e
-        );
-        // Only flip the engine UI label to 'device' after MAX_PIPER_FAILS
-        // consecutive errors. This avoids confusing users when a single
-        // transient native hiccup happens (e.g. AudioTrack underrun).
-        if (piperFailCountRef.current >= MAX_PIPER_FAILS) {
-          setEngine('device');
-        }
-        // Fall through to device fallback for THIS sentence; the next
-        // sentence will retry Piper from the top.
-      }
+    if (!isPiperReady()) {
+      // No engine ready — bail. The caller checks gen vs generationRef.
+      tracePiper('speak.skip', 'piper not ready');
+      playingRef.current = false;
+      pausedRef.current = false;
+      setEngine('error');
+      return;
     }
-
-    // expo-speech fallback (also used in Expo Go preview)
-    await new Promise<void>((resolve) => {
-      const rate = Math.max(0.5, Math.min(2.0, 1 / ls));
-      Speech.speak(text, {
-        language: 'it-IT',
-        rate,
-        onDone: () => resolve(),
-        onStopped: () => resolve(),
-        onError: () => resolve(),
+    try {
+      // Lockscreen / notification metadata: ONLY the static book identity
+      // (title + author + voice). Per spec, we never put the running
+      // sentence text on the OS UI — too distracting and changes every
+      // few seconds.
+      const rawCover = coverUrlRef.current;
+      const tpCover =
+        rawCover && (rawCover.startsWith('http://') ||
+                     rawCover.startsWith('https://') ||
+                     rawCover.startsWith('file://'))
+          ? rawCover
+          : null;
+      await piperSpeak(text, ls, {
+        bookTitle: titleRef.current || 'Audiobook',
+        bookAuthor: authorRef.current || '',
+        coverUrl: tpCover,
       });
-    });
+      // Success → reset failure counter; status stays 'piper'.
+      if (piperFailCountRef.current > 0) piperFailCountRef.current = 0;
+      setEngine((prev) => (prev === 'piper' ? prev : 'piper'));
+    } catch (e: any) {
+      piperFailCountRef.current += 1;
+      tracePiper('speak.failed',
+        `count=${piperFailCountRef.current}/${MAX_PIPER_FAILS} err=${e?.message || e}`);
+      if (piperFailCountRef.current >= MAX_PIPER_FAILS) {
+        setEngine('error');
+        setPiperError(`piper.speak: ${e?.message || String(e)}`);
+        playingRef.current = false;
+        pausedRef.current = false;
+      }
+      // Resolve so the loop can either advance (transient) or stop
+      // (after MAX_PIPER_FAILS). No device TTS fallback.
+    }
     if (gen !== generationRef.current) return; // stale
   }, []);
 
@@ -295,13 +286,21 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       if (engine === 'unknown' || !isPiperReady()) {
         try {
           const ok = await initEngine();
-          setEngine(ok ? 'piper' : 'device');
+          setEngine(ok ? 'piper' : 'error');
           const diag = getPiperDiagnostics();
           setPiperError(diag.lastError);
           setPiperStep(diag.lastStep);
+          if (!ok) {
+            // Engine init failed → don't even try to start the loop.
+            // The settings screen will display the error banner.
+            tracePiper('play.abort', 'piper init failed');
+            return;
+          }
         } catch (e: any) {
-          setEngine('device');
+          setEngine('error');
           setPiperError(`init-exception: ${e?.message || String(e)}`);
+          tracePiper('play.abort', `init exception ${e?.message || e}`);
+          return;
         }
       }
       // expo-audio owns the lockscreen / notification UI now. The track

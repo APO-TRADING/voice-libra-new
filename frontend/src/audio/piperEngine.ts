@@ -43,6 +43,11 @@ const VOICES_DIR = `${FileSystem.documentDirectory}piper/voices`;
 const ESPEAK_DIR = `${FileSystem.documentDirectory}piper/espeak-ng-data`;
 const TRACE_FILE = `${FileSystem.documentDirectory}piper-trace.log`;
 const ASYNC_VOICE_KEY = '@piper/selected_voice_v2';
+// PATCH (v2.1): opt-in NNAPI Execution Provider. When enabled, ONNX
+// Runtime will try to run as many ops as possible on the device's Neural
+// Networks API (TPU / NPU / DSP) before falling back to CPU. On phones
+// without a hardware accelerator this is a no-op (silent fallback to CPU).
+const ASYNC_USE_NNAPI_KEY = '@piper/use_nnapi_v1';
 
 // ----- State -----
 let currentVoiceId: string = DEFAULT_VOICE_ID;
@@ -261,6 +266,34 @@ export function getCurrentVoiceMeta(): VoiceMeta | null {
 }
 
 // =========================================================================
+// NNAPI EXECUTION PROVIDER OPT-IN
+// =========================================================================
+
+/** Read the user's preference for the NNAPI execution provider. */
+export async function getUseNnapi(): Promise<boolean> {
+  try {
+    const raw = await AsyncStorage.getItem(ASYNC_USE_NNAPI_KEY);
+    return raw === '1';
+  } catch {
+    return false;
+  }
+}
+
+/** Persist the user's NNAPI preference. Engine must reload to take effect. */
+export async function setUseNnapi(value: boolean): Promise<void> {
+  try {
+    await AsyncStorage.setItem(ASYNC_USE_NNAPI_KEY, value ? '1' : '0');
+    // Force engine reload on next play so the new option is honored.
+    ready = false;
+    loadedVoiceId = null;
+    initInFlight = null;
+    await trace('nnapi.set', `value=${value}`);
+  } catch {
+    /* ignore */
+  }
+}
+
+// =========================================================================
 // SYSTEM INFO LOGGING
 // =========================================================================
 
@@ -444,10 +477,13 @@ async function doInitEngine(): Promise<boolean> {
 
     emitProgress('Inizializzazione motore ONNX...', 70, 'Microsoft ONNX Runtime');
     await trace('==PHASE.3==', 'native.loadVoice');
+    const useNnapi = await getUseNnapi();
+    await trace('phase3.opts', `useNnapi=${useNnapi}`);
     const result = await native.loadVoice(
       stripFilePrefix(modelPath),
       configJson,
       stripFilePrefix(dataDir),
+      { useNnapi },
     );
     currentSampleRate = result.sampleRate;
     loadedVoiceId = voiceId;
@@ -459,7 +495,8 @@ async function doInitEngine(): Promise<boolean> {
       `espeak=${result.espeakVoice} ` +
       `nativePhonemizer=${(result as any).nativePhonemizer ?? 'unknown'} ` +
       `dictLang=${(result as any).phonemesDictLang ?? '?'} ` +
-      `dictSize=${(result as any).phonemesDictSize ?? '?'}`);
+      `dictSize=${(result as any).phonemesDictSize ?? '?'} ` +
+      `backend=${(result as any).executionProvider ?? 'CPU'}`);
     emitProgress('Voce pronta!', 100);
     setTimeout(() => emitProgress('', 0), 1500);
     return true;
@@ -540,9 +577,18 @@ function sanitizeForPiper(raw: string): string {
 //   speakSentence(text)     -> if buffer.text == text, use buffer.path; clear.
 //                              if buffer.text != text, drop the stale WAV.
 //   stopSpeak()             -> always drops the buffer.
+//
+// RACE CONDITION (fixed v2.1): two prebuffer calls in a row used to drop
+// each other's WAVs because the second call's `await preBufferInFlight`
+// would settle AFTER the in-flight job had already assigned `preBuffered`
+// to its (now stale) text. We now track the LATEST desired text and let
+// the completing job self-check before writing into `preBuffered`. Stale
+// results are deleted immediately instead of cascading into `text-mismatch`
+// drops at the next call site.
 // ---------------------------------------------------------------------------
 let preBuffered: { text: string; path: string } | null = null;
 let preBufferInFlight: Promise<void> | null = null;
+let preBufferDesired: string | null = null;
 
 async function dropPreBuffer(reason: string): Promise<void> {
   if (!preBuffered) return;
@@ -565,31 +611,49 @@ export async function prebufferSentence(text: string, lengthScale: number): Prom
   if (!native || !ready) return;
   const clean = sanitizeForPiper(text);
   if (!clean) return;
+  // Record the LATEST desired text so the in-flight job (if any) can
+  // self-check before assigning preBuffered. This is the heart of the
+  // race-condition fix.
+  preBufferDesired = clean;
   // If we already have a buffer for THIS text, nothing to do.
-  if (preBuffered && preBuffered.text === clean) return;
-  // Coalesce concurrent calls — only one synth job runs at a time. A second
-  // call before the first finishes is queued by awaiting the prior promise.
-  if (preBufferInFlight) {
-    try { await preBufferInFlight; } catch { /* ignore */ }
-  }
-  // The previous in-flight may have just filled the slot with the right
-  // text; re-check after the await.
   if (preBuffered && preBuffered.text === clean) return;
   // Drop any stale (different-text) buffer before starting a new synth.
   if (preBuffered && preBuffered.text !== clean) {
     await dropPreBuffer('text-mismatch');
+  }
+  // Coalesce concurrent calls — if another synth is already running, just
+  // record the new desired text and let the in-flight job pick it up. If
+  // when it completes the desiredText has moved on, the job will drop its
+  // result and we will queue a fresh synth from the next call.
+  if (preBufferInFlight) {
+    await trace('prebuf.coalesce', `desired=${clean.slice(0, 40)}`);
+    return;
   }
   const speed = Math.max(0.5, Math.min(2.0, 1 / lengthScale));
   const job = (async () => {
     try {
       await trace('prebuf.synth', `len=${clean.length} speed=${speed.toFixed(2)}`);
       const result = await native.synthesizeToFile(clean, 0, speed);
+      // Self-check: did the desired text move on while we were busy?
+      // If yes, our WAV is stale — delete it immediately.
+      if (preBufferDesired !== clean) {
+        await trace('prebuf.stale', `synth=${clean.slice(0, 30)} desired=${(preBufferDesired || '').slice(0, 30)}`);
+        try { await native.deleteWavFile(result.path); } catch { /* ignore */ }
+        return;
+      }
       preBuffered = { text: clean, path: result.path };
       await trace('prebuf.ready', `${result.path.split('/').pop()} ${Math.round(result.durationMs)}ms`);
     } catch (e: any) {
       await trace('prebuf.error', `${e?.message || e}`);
     } finally {
       preBufferInFlight = null;
+      // If the user asked for a NEW text while we were running, kick a
+      // fresh synth for that one now (won't recurse — only one job at a
+      // time thanks to preBufferInFlight).
+      const next = preBufferDesired;
+      if (next && next !== clean && ready) {
+        prebufferSentence(next, lengthScale).catch(() => { /* ignore */ });
+      }
     }
   })();
   preBufferInFlight = job;
@@ -693,6 +757,9 @@ export async function stopSpeak(): Promise<void> {
     await trace('stop.call', 'native.stopPlayback + expo-audio.stop');
     if (native) await native.stopPlayback().catch(() => {});
     await stopPlayback();
+    // Clear pre-buffer state — any in-flight synth job will see the
+    // null desired-text and discard its result.
+    preBufferDesired = null;
     await dropPreBuffer('stop');
     if (native) await native.cleanupWavCache().catch(() => {});
     await trace('stop.call', 'OK');

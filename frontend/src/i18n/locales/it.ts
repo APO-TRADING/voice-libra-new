@@ -133,6 +133,20 @@ export const it = {
   'voice.import.delete.button': 'Elimina',
   'voice.import.dynamic.badge': 'PERSONALE',
 
+  // TTS engine card
+  'settings.tts.section': 'Motore TTS',
+  'settings.tts.status.ready': 'Piper on-device attivo',
+  'settings.tts.status.ready.desc': 'Inferenza locale tramite Microsoft ONNX Runtime + voce Piper selezionata. Nessun server, nessuna connessione richiesta.',
+  'settings.tts.status.idle': 'Piper (caricamento al primo play)',
+  'settings.tts.status.idle.desc': 'Il motore Piper verrà inizializzato al primo Play. La prima inizializzazione può richiedere 10-30 secondi (estrazione fonemi).',
+  'settings.tts.status.error': 'Motore TTS in errore',
+  'settings.tts.status.error.prefix': 'Errore inizializzazione',
+  'settings.tts.status.error.desc': 'Tocca "Verifica" qui sotto per diagnosticare. La voce di sistema NON verrà utilizzata.',
+
+  // NNAPI execution provider
+  'settings.nnapi.label': 'Acceleratore AI (NNAPI)',
+  'settings.nnapi.desc': 'Sfrutta il chip neurale del telefono per velocizzare la sintesi. Sperimentale — se l\'audio gracchia o il motore non parte, disattiva.',
+
   // Errors
   'error.bookNotFound': 'Libro non trovato',
   'error.contentMissing': 'Contenuto libro mancante',

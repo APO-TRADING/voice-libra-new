@@ -59,6 +59,10 @@ const bookFilePathSentences = (id: string) => `${BOOKS_DIR}/${id}.sentences.txt`
 // instant (zero disk I/O, zero JSON.parse).
 const BOOK_CACHE_MAX = 10;
 const bookCache: Map<string, BookFull> = new Map();
+// PATCH (v2.1 — istantaneo): dedupe concurrent prefetch() calls so a quick
+// double-tap on a book card doesn't fire two parallel disk reads. Cleared
+// as soon as the read completes (success or failure).
+const prefetchInFlight: Map<string, Promise<BookFull | null>> = new Map();
 function cacheGet(id: string): BookFull | undefined {
   const v = bookCache.get(id);
   if (v) {
@@ -181,11 +185,25 @@ async function writeBookContent(id: string, content: string, sentences: string[]
   );
 }
 
-async function readBookContent(id: string): Promise<{ content: string; sentences: string[] }> {
+async function readBookContent(id: string, opts?: { sentencesOnly?: boolean }): Promise<{ content: string; sentences: string[] }> {
+  const sentencesOnly = !!opts?.sentencesOnly;
   // 1) Try the NEW v6.6 plain-text format (current default).
   try {
     const ci = await FileSystem.getInfoAsync(bookFilePathContent(id));
     if (ci.exists) {
+      if (sentencesOnly) {
+        // PATCH (v2.1 — istantaneo): for playback we only need the sentence
+        // array, NOT the full content blob. Skipping the .txt read halves
+        // the I/O cost on every book-open (the .txt file mirrors the
+        // sentences file but as one big string; nothing in the player UI
+        // reads `content` after load).
+        const sentencesRaw = await FileSystem.readAsStringAsync(
+          bookFilePathSentences(id),
+          { encoding: FileSystem.EncodingType.UTF8 },
+        ).catch(() => '');
+        const sentences = sentencesRaw ? sentencesRaw.split('\n') : [];
+        return { content: '', sentences };
+      }
       const [content, sentencesRaw] = await Promise.all([
         FileSystem.readAsStringAsync(bookFilePathContent(id), {
           encoding: FileSystem.EncodingType.UTF8,
@@ -354,10 +372,48 @@ export const library = {
     const list = await loadBooks();
     const b = list.find((x) => x.id === id);
     if (!b) throw new Error('Libro non trovato');
-    const { content, sentences } = await readBookContent(id);
+    // PATCH (v2.1 — istantaneo): read ONLY the sentence array. The .txt
+    // full-content blob is unused by the player UI; skipping it cuts the
+    // book-open I/O time roughly in half on multi-MB novels. We still
+    // honor the legacy migration path inside readBookContent (it will
+    // upgrade old JSON/AsyncStorage layouts on first read).
+    const { content, sentences } = await readBookContent(id, { sentencesOnly: true });
     const full: BookFull = { ...b, content, sentences };
     cachePut(id, full);
     return full;
+  },
+
+  /**
+   * Fire-and-forget cache warm-up. Called from BookList card press so the
+   * sentences are already in RAM by the time the player screen mounts and
+   * runs getBook(). Safe to call multiple times — the cache and the in-
+   * flight tracker dedupe concurrent calls.
+   *
+   * Returns the cached BookFull on success, null on failure. Errors are
+   * intentionally swallowed (this is a UX hint, not a critical path).
+   */
+  async prefetchBook(id: string): Promise<BookFull | null> {
+    try {
+      if (bookCache.has(id)) return bookCache.get(id) || null;
+      if (prefetchInFlight.has(id)) {
+        try { await prefetchInFlight.get(id); } catch { /* ignore */ }
+        return bookCache.get(id) || null;
+      }
+      const p = (async () => {
+        try {
+          return await library.getBook(id);
+        } catch {
+          return null;
+        }
+      })();
+      prefetchInFlight.set(id, p);
+      const result = await p;
+      prefetchInFlight.delete(id);
+      return result;
+    } catch {
+      prefetchInFlight.delete(id);
+      return null;
+    }
   },
 
   async addBook(input: {

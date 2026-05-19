@@ -17,6 +17,9 @@ export type SortMode = LSortMode;
 
 export const api = {
   listBooks: (folderId?: string) => library.listBooks(folderId),
+  // Pre-fill the in-memory book cache so the player screen mounts
+  // instantly. Fire-and-forget — callers should NOT await this.
+  prefetchBook: (id: string) => library.prefetchBook(id),
   // Returns books sorted according to the user's current preference (or
   // `mode` if provided). Pass folderId='none' to filter to books NOT in
   // any folder, or a specific folder ID to filter to that folder.

@@ -124,6 +124,18 @@ export const en: TranslationDict = {
   'voice.import.delete.button': 'Delete',
   'voice.import.dynamic.badge': 'CUSTOM',
 
+  'settings.tts.section': 'TTS Engine',
+  'settings.tts.status.ready': 'Piper on-device active',
+  'settings.tts.status.ready.desc': 'Local inference via Microsoft ONNX Runtime + selected Piper voice. No server, no internet required.',
+  'settings.tts.status.idle': 'Piper (loads on first play)',
+  'settings.tts.status.idle.desc': 'Piper will initialise on first Play. The first load can take 10-30 seconds (phoneme extraction).',
+  'settings.tts.status.error': 'TTS engine error',
+  'settings.tts.status.error.prefix': 'Initialisation error',
+  'settings.tts.status.error.desc': 'Tap "Verify" below to diagnose. The system voice will NOT be used.',
+
+  'settings.nnapi.label': 'AI accelerator (NNAPI)',
+  'settings.nnapi.desc': 'Use the phone\'s neural chip to speed up synthesis. Experimental — turn off if audio glitches or the engine fails to start.',
+
   'error.bookNotFound': 'Book not found',
   'error.contentMissing': 'Book content missing',
   'error.empty': 'Document is empty after cleaning',

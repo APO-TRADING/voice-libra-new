@@ -298,6 +298,7 @@ export default function BookList({
             <View style={styles.gridCard}>
               <TouchableOpacity
                 testID={`book-card-${item.id}`}
+                onPressIn={() => { try { api.prefetchBook(item.id); } catch { /* ignore */ } }}
                 onPress={() => router.push(`/player/${item.id}`)}
                 onLongPress={() => onLongPress(item)}
                 activeOpacity={0.85}
@@ -403,6 +404,7 @@ export default function BookList({
                   borderWidth: isActive ? 2 : 1,
                 },
               ]}
+              onPressIn={() => { try { api.prefetchBook(item.id); } catch { /* ignore */ } }}
               onPress={() => router.push(`/player/${item.id}`)}
               onLongPress={() => onLongPress(item)}
               activeOpacity={0.85}

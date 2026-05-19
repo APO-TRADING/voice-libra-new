@@ -48,14 +48,21 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
   // ----- Public methods (called from JS) -----
 
   /**
-   * loadVoice(modelPath, configJson, espeakDataPath, promise)
+   * loadVoice(modelPath, configJson, espeakDataPath, options, promise)
    * Resolves with { sampleRate, lengthScale, noiseScale, noiseW, language, ... }.
+   *
+   * `options` is a JS object with engine knobs. Currently supported keys:
+   *   useNnapi: Boolean — opt-in NNAPI execution provider (default false).
+   *
+   * For backwards-compat the older 4-arg form (no options) is still
+   * accepted via the @ReactMethod overload below.
    */
   @ReactMethod
-  fun loadVoice(modelPath: String, configJson: String, espeakDataPath: String, promise: Promise) {
+  fun loadVoice(modelPath: String, configJson: String, espeakDataPath: String, options: com.facebook.react.bridge.ReadableMap?, promise: Promise) {
+    val useNnapi = options?.let { if (it.hasKey("useNnapi")) it.getBoolean("useNnapi") else false } ?: false
     ttsScope.launch {
       try {
-        val out = doLoadVoice(modelPath, configJson, espeakDataPath)
+        val out = doLoadVoice(modelPath, configJson, espeakDataPath, useNnapi)
         promise.resolve(out)
       } catch (e: Throwable) {
         Log.e(TAG, "loadVoice failed", e)
@@ -64,8 +71,8 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
     }
   }
 
-  private suspend fun doLoadVoice(modelPath: String, configJson: String, espeakDataPath: String): com.facebook.react.bridge.WritableMap {
-    Log.i(TAG, "doLoadVoice model=$modelPath espeakData=$espeakDataPath")
+  private suspend fun doLoadVoice(modelPath: String, configJson: String, espeakDataPath: String, useNnapi: Boolean): com.facebook.react.bridge.WritableMap {
+    Log.i(TAG, "doLoadVoice model=$modelPath espeakData=$espeakDataPath useNnapi=$useNnapi")
     if (!File(modelPath).exists()) {
       throw IllegalArgumentException("model.onnx not found at $modelPath")
     }
@@ -135,7 +142,7 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
     // Build ORT session
     val previous = engineRef.getAndSet(null)
     previous?.close()
-    val engine = withContext(Dispatchers.IO) { OnnxEngine(modelPath, voice) }
+    val engine = withContext(Dispatchers.IO) { OnnxEngine(modelPath, voice, useNnapi) }
     engineRef.set(engine)
     voiceRef.set(voice)
 
@@ -152,8 +159,9 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
       putBoolean("nativePhonemizer", nativePhonemizerReady)
       putInt("phonemesDictSize", ItalianPhonemizer.dictionarySize())
       putString("phonemesDictLang", ItalianPhonemizer.dictionaryLanguage())
+      putString("executionProvider", engine.executionProvider)
     }
-    Log.i(TAG, "doLoadVoice OK (nativePhonemizer=$nativePhonemizerReady dictLang=${ItalianPhonemizer.dictionaryLanguage()} dictSize=${ItalianPhonemizer.dictionarySize()})")
+    Log.i(TAG, "doLoadVoice OK (nativePhonemizer=$nativePhonemizerReady dictLang=${ItalianPhonemizer.dictionaryLanguage()} dictSize=${ItalianPhonemizer.dictionarySize()} EP=${engine.executionProvider})")
     return out
   }
 
@@ -186,7 +194,8 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
         return
       }
       val raw = File(cfgPath).readText()
-      loadVoice(modelPath, raw, dataDir, promise)
+      // Legacy callers don't pass options — default to CPU EP.
+      loadVoice(modelPath, raw, dataDir, null, promise)
     } catch (e: Throwable) {
       promise.reject("E_INIT", e.message ?: e.javaClass.simpleName, e)
     }

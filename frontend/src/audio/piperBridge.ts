@@ -4,7 +4,14 @@
 import { NativeModules } from 'react-native';
 
 export type PiperNative = {
-  loadVoice: (modelPath: string, configJson: string, espeakDataPath: string) => Promise<{
+  loadVoice: (
+    modelPath: string,
+    configJson: string,
+    espeakDataPath: string,
+    /** Optional engine options. New in v2.1 — Kotlin side gracefully
+     *  ignores it if missing (backwards compatible with old JS bundles). */
+    options?: { useNnapi?: boolean },
+  ) => Promise<{
     sampleRate: number;
     lengthScale: number;
     noiseScale: number;
@@ -19,6 +26,8 @@ export type PiperNative = {
     phonemesDictLang?: string;
     /** Number of word→IPA entries in the loaded dictionary (0 if none). */
     phonemesDictSize?: number;
+    /** ONNX Runtime execution provider actually used ("NNAPI" or "CPU"). */
+    executionProvider?: string;
   }>;
   unloadVoice: () => Promise<unknown>;
   /**
