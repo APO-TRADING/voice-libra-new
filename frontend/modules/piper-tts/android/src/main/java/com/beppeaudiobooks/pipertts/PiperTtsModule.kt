@@ -6,6 +6,8 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.ReadableMap
+import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -58,7 +60,7 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
    * accepted via the @ReactMethod overload below.
    */
   @ReactMethod
-  fun loadVoice(modelPath: String, configJson: String, espeakDataPath: String, options: com.facebook.react.bridge.ReadableMap?, promise: Promise) {
+  fun loadVoice(modelPath: String, configJson: String, espeakDataPath: String, options: ReadableMap?, promise: Promise) {
     val useNnapi = options?.let { if (it.hasKey("useNnapi")) it.getBoolean("useNnapi") else false } ?: false
     ttsScope.launch {
       try {
@@ -71,7 +73,7 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
     }
   }
 
-  private suspend fun doLoadVoice(modelPath: String, configJson: String, espeakDataPath: String, useNnapi: Boolean): com.facebook.react.bridge.WritableMap {
+  private suspend fun doLoadVoice(modelPath: String, configJson: String, espeakDataPath: String, useNnapi: Boolean): WritableMap {
     Log.i(TAG, "doLoadVoice model=$modelPath espeakData=$espeakDataPath useNnapi=$useNnapi")
     if (!File(modelPath).exists()) {
       throw IllegalArgumentException("model.onnx not found at $modelPath")

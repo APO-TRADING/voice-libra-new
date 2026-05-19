@@ -180,9 +180,9 @@ data class VoiceConfig(
         "korean" to "ko",
       )
       byName[cleaned]?.let { return it }
-      byName[base]?.let { /* fall through to region-based refinement */
-        // Use the friendly-name match as base, then try to refine by region.
-      }
+      // Note: we deliberately don't return on a base-only match (e.g.
+      // "english") because the region-aware switch below handles the
+      // refinement (en-us vs en-gb, es vs es-419, fr-fr vs fr-ch).
       // Region-aware refinements: only apply for languages with multiple
       // espeak variants. For everything else (it, de, pl, …) the base code
       // is what espeak ships.

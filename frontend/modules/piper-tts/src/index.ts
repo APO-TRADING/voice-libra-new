@@ -17,7 +17,12 @@ import { NativeModules } from 'react-native';
 
 const { TTSManager } = NativeModules as {
   TTSManager?: {
-    loadVoice: (modelPath: string, configJson: string, espeakDataPath: string) => Promise<{
+    loadVoice: (
+      modelPath: string,
+      configJson: string,
+      espeakDataPath: string,
+      options?: { useNnapi?: boolean },
+    ) => Promise<{
       sampleRate: number;
       lengthScale: number;
       noiseScale: number;
@@ -28,6 +33,7 @@ const { TTSManager } = NativeModules as {
       numSymbols: number;
       espeakVoice: string;
       nativePhonemizer: boolean;
+      executionProvider?: string;
     }>;
     unloadVoice: () => Promise<void>;
     synthesizeToFile: (text: string, sid: number, speed: number) => Promise<{
