@@ -65,10 +65,26 @@ endif()
 add_library(piper_phonemize_jni SHARED phonemize_jni.cpp)
 
 # We need the public espeak-ng headers (speak_lib.h).
+#
+# IMPORTANT: when phonemize_jni.cpp includes <string> from the C++ stdlib,
+# clang on Android NDK transitively pulls in <cwctype> which on this
+# toolchain re-uses espeak's `compat/wctype.h` shim (added to our include
+# path via the linked espeak-ng INTERFACE). That shim in turn does
+# `#include <ucd/ucd.h>` — failing the build with:
+#   fatal error: 'ucd/ucd.h' file not found
+#
+# The ucd-tools headers live in the espeak-ng source tree but their
+# include directory is private to the `ucd` target (we link against
+# `espeak-ng`, not `ucd` directly). We therefore expose them explicitly
+# here. The path may exist in either the SOURCE or BINARY tree depending
+# on whether ucd-tools was generated as a subbuild artifact, so we add
+# both candidates and let CMake skip the one that doesn't exist.
 target_include_directories(piper_phonemize_jni PRIVATE
   ${espeak_ng_SOURCE_DIR}/src/include
   ${espeak_ng_SOURCE_DIR}/src/include/espeak-ng
   ${espeak_ng_BINARY_DIR}/src/include
+  ${espeak_ng_SOURCE_DIR}/src/ucd-tools/src/include
+  ${espeak_ng_BINARY_DIR}/src/ucd-tools/src/include
 )
 
 find_library(log-lib log)
