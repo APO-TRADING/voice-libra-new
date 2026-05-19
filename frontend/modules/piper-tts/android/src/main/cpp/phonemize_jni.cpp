@@ -100,6 +100,11 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativeSetVoice(
 
 // Returns the IPA-phoneme string produced by espeak for the given text.
 // Sentences are separated by spaces. Stress markers (ˈ, ˌ) are preserved.
+// Punctuation markers (. , ? ! : ;) are re-injected into the stream at
+// clause boundaries — espeak normally STRIPS them from the phoneme
+// output, but Piper VITS models are TRAINED with these tokens (they
+// drive the model's prosody, intonation, and pause timing). The exact
+// algorithm matches rhasspy/piper-phonemize's phonemize_eSpeak().
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
     JNIEnv* env, jclass, jstring jText) {
@@ -111,35 +116,57 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
   std::string text = jstringToString(env, jText);
   if (text.empty()) return env->NewStringUTF("");
 
-  // espeak_TextToPhonemes() reads from a const void** pointer (a moving
-  // cursor into the text) and returns a const char* into an INTERNAL
-  // buffer that's reused on each call — so we copy out immediately.
+  // Internal espeak-ng clause-type constants (from src/libespeak-ng/translate.h
+  // at the pinned commit). Lower 20 bits encode the punctuation kind.
+  // The CLAUSE_TYPE_SENTENCE bit (in upper bits) signals end-of-sentence.
+  static constexpr int CLAUSE_TYPE_MASK    = 0x000FFFFF;
+  static constexpr int CLAUSE_PERIOD       = 40 | 0x00000000 | 0x00080000;
+  static constexpr int CLAUSE_COMMA        = 20 | 0x00001000 | 0x00040000;
+  static constexpr int CLAUSE_QUESTION     = 40 | 0x00002000 | 0x00080000;
+  static constexpr int CLAUSE_EXCLAMATION  = 45 | 0x00003000 | 0x00080000;
+  static constexpr int CLAUSE_COLON        = 30 | 0x00000000 | 0x00040000;
+  static constexpr int CLAUSE_SEMICOLON    = 30 | 0x00001000 | 0x00040000;
+
+  // espeak_TextToPhonemesWithTerminator() reads from a const void**
+  // pointer (a moving cursor into the text), returns a const char* into
+  // an INTERNAL buffer that's reused on each call, AND writes the clause
+  // terminator code into the int* — letting us know if THIS clause ended
+  // with `.`, `,`, `?`, `!`, `:`, or `;` so we can re-inject the proper
+  // punctuation marker into the phoneme stream.
   //
-  // textmode = espeakCHARS_UTF8 (treat input as UTF-8).
-  //
-  // phonememode: per espeak-ng/src/include/espeak-ng/speak_lib.h:
-  //   bit 1:     0 = espeak ASCII phoneme codes (e.g. "k", "a:", "tS")
-  //              1 = IPA Unicode characters (e.g. "k", "aː", "tʃ") ← we want this
-  //   bits 8-23: separator character between phoneme tokens (0 = none,
-  //              keeps the phonemes joined as a single tight string)
-  //
-  // Stress markers (ˈ primary, ˌ secondary) are embedded inline in the
-  // IPA stream by default — no extra flag needed. Length marker ː and
-  // syllable boundary markers come along for free too.
-  //
-  // espeak_TextToPhonemes returns one CLAUSE per call (chunked at
-  // sentence boundaries and commas), so we loop until textPtr is set
-  // to NULL by espeak (= end of input).
+  // phonememode = 0x02 → IPA UTF-8 output (bit 1 = use IPA).
+  // Stress markers (ˈ ˌ) and length (ː) are embedded inline by default.
   const void* textPtr = text.c_str();
   std::string result;
   while (textPtr != nullptr) {
-    const char* chunk = espeak_TextToPhonemes(
+    int terminator = 0;
+    const char* chunk = espeak_TextToPhonemesWithTerminator(
         &textPtr,
         /*textmode=*/espeakCHARS_UTF8,
-        /*phonememode=*/0x02);
-    if (!chunk) break;
-    if (!result.empty()) result.append(" "); // sentence boundary
-    result.append(chunk);
+        /*phonememode=*/0x02,
+        &terminator);
+    if (chunk && *chunk) {
+      result.append(chunk);
+    }
+    // Re-inject the punctuation marker EXACTLY as piper-phonemize does
+    // it for Piper VITS models. See rhasspy/piper-phonemize src/phonemize.cpp.
+    int punct = terminator & CLAUSE_TYPE_MASK;
+    if (punct == CLAUSE_PERIOD) {
+      result.push_back('.');
+    } else if (punct == CLAUSE_QUESTION) {
+      result.push_back('?');
+    } else if (punct == CLAUSE_EXCLAMATION) {
+      result.push_back('!');
+    } else if (punct == CLAUSE_COMMA) {
+      result.push_back(',');
+      result.push_back(' ');
+    } else if (punct == CLAUSE_COLON) {
+      result.push_back(':');
+      result.push_back(' ');
+    } else if (punct == CLAUSE_SEMICOLON) {
+      result.push_back(';');
+      result.push_back(' ');
+    }
   }
   return env->NewStringUTF(result.c_str());
 }

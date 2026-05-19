@@ -94,8 +94,12 @@ data class VoiceConfig(
     val bos = phonemeIdMap["^"] ?: intArrayOf(1)
     val pad = phonemeIdMap["_"] ?: intArrayOf(0)
     val eos = phonemeIdMap["$"] ?: intArrayOf(2)
-    // BOS
+    // BOS + pad — piper-phonemize emits the pad RIGHT after BOS. Missing
+    // this token makes Piper's VITS model "start late", truncating the
+    // first vowel and producing a robotic first word. Verified against
+    // rhasspy/piper-phonemize::phonemes_to_ids().
     for (id in bos) out.add(id)
+    for (id in pad) out.add(id)
     var i = 0
     while (i < ipaText.length) {
       val cp = ipaText.codePointAt(i)
@@ -107,7 +111,7 @@ data class VoiceConfig(
       }
       i += Character.charCount(cp)
     }
-    // EOS
+    // EOS (no trailing pad — piper-phonemize doesn't emit one either).
     for (id in eos) out.add(id)
     return out.toIntArray()
   }
