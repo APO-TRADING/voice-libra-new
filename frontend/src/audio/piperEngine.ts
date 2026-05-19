@@ -650,7 +650,7 @@ export async function speakSentence(
     //    naturally (didJustFinish) or when stopPlayback() is called.
     const sentenceMeta: SentenceMetadata = {
       bookTitle: meta?.bookTitle || 'Audiobook',
-      bookAuthor: meta?.bookAuthor || 'Beppe Audiobooks',
+      bookAuthor: meta?.bookAuthor || 'eBook Speaker',
       voiceName: meta?.voiceName || currentVoiceMeta?.name || currentVoiceId,
       coverUrl: meta?.coverUrl || null,
     };

@@ -640,7 +640,7 @@ export default function SettingsScreen() {
       </View>
 
       <Text style={[styles.footer, { color: colors.textSecondary }]}>
-        Beppe Audiobooks · v2.0 · Powered by Piper TTS (Microsoft ONNX Runtime + espeak-ng)
+        eBook Speaker · v2.0 · Powered by Piper TTS (Microsoft ONNX Runtime + espeak-ng)
       </Text>
     </ScrollView>
   );
