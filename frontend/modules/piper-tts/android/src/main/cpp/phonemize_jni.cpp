@@ -114,12 +114,22 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
   // espeak_TextToPhonemes() reads from a const void** pointer (a moving
   // cursor into the text) and returns a const char* into an INTERNAL
   // buffer that's reused on each call — so we copy out immediately.
-  // textmode = espeakCHARS_UTF8; phonememode = bits set:
-  //   bit 0: 0 = use IPA; 1 = use espeak ASCII
-  //   bit 1: 1 = include stress markers
-  //   bit 4-7: 0 = no separator; 1-4 = various separators; we want 2 (use Unicode IPA chars).
-  // We want IPA with stress markers, no extra separator between phonemes.
-  // phonememode = 0x02 (bit0=0 IPA, bit1=1 stress).
+  //
+  // textmode = espeakCHARS_UTF8 (treat input as UTF-8).
+  //
+  // phonememode: per espeak-ng/src/include/espeak-ng/speak_lib.h:
+  //   bit 1:     0 = espeak ASCII phoneme codes (e.g. "k", "a:", "tS")
+  //              1 = IPA Unicode characters (e.g. "k", "aː", "tʃ") ← we want this
+  //   bits 8-23: separator character between phoneme tokens (0 = none,
+  //              keeps the phonemes joined as a single tight string)
+  //
+  // Stress markers (ˈ primary, ˌ secondary) are embedded inline in the
+  // IPA stream by default — no extra flag needed. Length marker ː and
+  // syllable boundary markers come along for free too.
+  //
+  // espeak_TextToPhonemes returns one CLAUSE per call (chunked at
+  // sentence boundaries and commas), so we loop until textPtr is set
+  // to NULL by espeak (= end of input).
   const void* textPtr = text.c_str();
   std::string result;
   while (textPtr != nullptr) {
@@ -128,6 +138,7 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
         /*textmode=*/espeakCHARS_UTF8,
         /*phonememode=*/0x02);
     if (!chunk) break;
+    if (!result.empty()) result.append(" "); // sentence boundary
     result.append(chunk);
   }
   return env->NewStringUTF(result.c_str());

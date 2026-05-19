@@ -21,7 +21,9 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 include(FetchContent)
 
 # espeak-ng's CMake produces a static `espeak-ng` target if BUILD_SHARED_LIBS
-# is OFF. We disable all audio backends (we only need text→phonemes).
+# is OFF. We disable all audio backends (we only need text→phonemes), all
+# host tooling (we use the prebuilt data files shipped as Android assets),
+# and all non-essential extras.
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(BUILD_ESPEAK_NG_EXE OFF CACHE BOOL "" FORCE)
 set(BUILD_ESPEAK_NG_TESTS OFF CACHE BOOL "" FORCE)
@@ -33,12 +35,22 @@ set(USE_KLATT OFF CACHE BOOL "" FORCE)
 set(USE_SPEECHPLAYER OFF CACHE BOOL "" FORCE)
 set(EXTRA_cmn OFF CACHE BOOL "" FORCE)
 set(EXTRA_fr OFF CACHE BOOL "" FORCE)
+# CRITICAL for cross-compile: do NOT build the data-compiler host tool
+# (it would try to run on the target = ARM device, which obviously fails).
+# We ship pre-compiled data files (phondata, phonindex, phontab, _dict)
+# via Android assets — extracted at runtime to context.filesDir.
+set(BUILD_DATA OFF CACHE BOOL "" FORCE)
+# Avoid pkg-config probing that fails on bare Android toolchains.
+set(CMAKE_DISABLE_FIND_PACKAGE_PkgConfig TRUE)
 
 FetchContent_Declare(
   espeak_ng
   GIT_REPOSITORY https://github.com/rhasspy/espeak-ng.git
-  # Piper-compatible fork. Pin to the commit used by piper 1.2.0 release.
-  GIT_TAG 4ea15fc6e3ce9d5e6d97d7c2e8ad8e3a5f56462a
+  # Piper-compatible fork. Pinned to the latest master commit
+  # (2025-05-19, head of rhasspy/espeak-ng master at time of integration).
+  # Contains Android compile fixes (UCD CMake + iOS portability) on top
+  # of upstream espeak-ng 1.51.
+  GIT_TAG 8593723f10cfd9befd50de447f14bf0a9d2a14a4
   GIT_SHALLOW FALSE
 )
 FetchContent_MakeAvailable(espeak_ng)

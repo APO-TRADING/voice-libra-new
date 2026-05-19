@@ -1,13 +1,17 @@
 // piper-tts native module for Android.
 //
-// ITERATION 1 (this build): Microsoft ONNX Runtime + Italian Kotlin
-// phonemizer. Works for any Italian Piper model out of the box. NO NDK
-// compilation, so EAS builds in normal time.
+// ITERATION 2 (CURRENT): Microsoft ONNX Runtime + espeak-ng (compiled
+// from source via NDK + CMake). Provides full prosody, intonation, and
+// per-language dictionaries (it, en, es, fr, de) backed by the real
+// espeak-ng phoneme tables. The Kotlin ItalianPhonemizer.kt is kept
+// as a fallback if the native .so fails to load on a given device.
 //
-// ITERATION 2 (planned): Add espeak-ng compilation via NDK + CMake for
-// full multi-language support. The Kotlin fallback in ItalianPhonemizer.kt
-// will continue to work for Italian models if the native phonemizer
-// fails to load \u2014 see PiperTtsModule.kt for the resilient init logic.
+// Build time impact: ~8-12 extra minutes on first EAS build (espeak-ng
+// source is fetched via FetchContent then compiled per ABI). Subsequent
+// builds reuse the CMake cache when CI honors it.
+//
+// To disable native compilation (returns to ITERATION 1 dictionary-only
+// behavior, ~12 min faster build) pass `-PwithNativePhonemizer=false`.
 
 buildscript {
   def kotlin_version = rootProject.ext.has("kotlinVersion") ? rootProject.ext.get("kotlinVersion") : "2.0.21"
@@ -25,10 +29,11 @@ def safeExtGet(prop, fallback) {
   rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
 }
 
-// Toggle this to 'true' in a future iteration to compile espeak-ng from
-// source via NDK. For now we keep it 'false' so the APK builds reliably
-// using the Kotlin Italian-only fallback phonemizer.
-def withNativePhonemizer = (project.findProperty('withNativePhonemizer') ?: 'false') == 'true'
+// Default ON: compile espeak-ng from source via NDK + CMake. Use the
+// Gradle property `-PwithNativePhonemizer=false` to fall back to the
+// Kotlin Italian-only dictionary phonemizer (faster builds, but no
+// real prosody / intonation curves / multi-language support).
+def withNativePhonemizer = (project.findProperty('withNativePhonemizer') ?: 'true') == 'true'
 
 android {
   namespace "com.beppeaudiobooks.pipertts"
