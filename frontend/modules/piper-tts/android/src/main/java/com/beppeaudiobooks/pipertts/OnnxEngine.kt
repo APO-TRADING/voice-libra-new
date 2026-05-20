@@ -23,20 +23,18 @@ import java.nio.LongBuffer
  * Microsoft ONNX Runtime Android supports FP32, FP16, INT8 weights natively
  * via its kernel set — we do NOT need to write any quantization logic.
  *
- * Execution providers:
- *   - default: CPU (XNNPack-accelerated kernels).
- *   - useNnapi=true: try Android NNAPI first, fall back to CPU per op.
- *     NNAPI requires Android 8.1+ and a device with an NPU/DSP/GPU EP.
- *     If addNnapi() throws (e.g. unsupported device / runtime), we
- *     transparently fall back to CPU; the user-facing log records
- *     `executionProvider` so the user can see what actually happened.
+ * Execution provider (v2.2): CPU + XNNPACK only. NNAPI was attempted in
+ * v2.1 but caused ORT_FAIL crashes on Realme/MediaTek phones running
+ * Android 16; the few devices where it *did* load didn't show any
+ * measurable inference speedup for VITS-style graphs. CPU EP with the
+ * built-in XNNPACK kernels is the production path.
  */
-class OnnxEngine(modelPath: String, private val voice: VoiceConfig, useNnapi: Boolean = false) {
+class OnnxEngine(modelPath: String, private val voice: VoiceConfig) {
   private val env = OrtEnvironment.getEnvironment()
   private val session: OrtSession
   private val hasSpeakerInput: Boolean
-  /** Reports back to JS which EP was effectively used. */
-  val executionProvider: String
+  /** Reports back to JS which EP was effectively used (always "CPU" in v2.2). */
+  val executionProvider: String = "CPU"
 
   init {
     val opts = OrtSession.SessionOptions().apply {
@@ -50,64 +48,12 @@ class OnnxEngine(modelPath: String, private val voice: VoiceConfig, useNnapi: Bo
       setIntraOpNumThreads(4)
     }
 
-    // PATCH (v2.1): opt-in NNAPI execution provider. ORT routes each op
-    // graph node to NNAPI when supported, else falls back to CPU. We
-    // pass NO flags (default) to let ORT pick the safest config. If the
-    // ORT build / device combo can't enable NNAPI at all, we silently
-    // fall back to CPU and log it.
-    var actualEp = "CPU"
-    if (useNnapi) {
-      try {
-        // Reflection avoids a hard compile-time dep on the NnapiFlags
-        // enum which is only present in onnxruntime-android (NOT in the
-        // -mobile variant). On the regular AAR this just works.
-        val flagsClass = Class.forName("ai.onnxruntime.providers.NNAPIFlags")
-        val noneOfMethod = java.util.EnumSet::class.java.getMethod("noneOf", Class::class.java)
-        @Suppress("UNCHECKED_CAST")
-        val empty = noneOfMethod.invoke(null, flagsClass) as java.util.EnumSet<*>
-        val addNnapi = opts.javaClass.methods.firstOrNull { it.name == "addNnapi" && it.parameterTypes.size == 1 }
-        if (addNnapi != null) {
-          addNnapi.invoke(opts, empty)
-          actualEp = "NNAPI"
-          Log.i(TAG, "NNAPI execution provider enabled")
-        } else {
-          Log.w(TAG, "addNnapi() method not found — staying on CPU EP")
-        }
-      } catch (e: Throwable) {
-        // Common reasons:
-        //   - using onnxruntime-mobile AAR (no NNAPI symbols)
-        //   - device API < 27 / no NNAPI HAL
-        //   - the device's NN HAL crashed during session creation
-        // CPU fallback is safe; just log so the user can see why their
-        // NNAPI toggle didn't activate.
-        Log.w(TAG, "NNAPI requested but unavailable: ${e.message}; falling back to CPU")
-      }
-    }
-
-    Log.i(TAG, "Loading ONNX model from $modelPath (EP=$actualEp)")
+    Log.i(TAG, "Loading ONNX model from $modelPath (EP=CPU)")
     // Use the path-based createSession so ORT can mmap() the model file
     // directly instead of us reading the whole thing into a Java byte[].
     // This matters for medium/high-quality Piper models (60-100 MB) on
     // low-memory devices: byte[] would briefly DOUBLE the memory peak.
-    session = try {
-      env.createSession(modelPath, opts)
-    } catch (e: Throwable) {
-      // NNAPI session creation can fail mid-graph on some devices.
-      // Retry once with a fresh CPU-only options block before bubbling up.
-      if (actualEp == "NNAPI") {
-        Log.w(TAG, "createSession failed with NNAPI: ${e.message}; retrying CPU-only")
-        val cpuOpts = OrtSession.SessionOptions().apply {
-          setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-          setInterOpNumThreads(2)
-          setIntraOpNumThreads(4)
-        }
-        actualEp = "CPU"
-        env.createSession(modelPath, cpuOpts)
-      } else {
-        throw e
-      }
-    }
-    executionProvider = actualEp
+    session = env.createSession(modelPath, opts)
     hasSpeakerInput = session.inputNames.contains("sid")
     Log.i(TAG, "Model loaded. EP=$executionProvider inputs=${session.inputNames} hasSid=$hasSpeakerInput outputs=${session.outputNames}")
   }

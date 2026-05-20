@@ -3,16 +3,23 @@
 // NATIVE-ONLY: Metro picks audiobookPlayer.web.ts on web. On Android / iOS
 // the import below is real.
 //
-// Architecture (post react-native-track-player migration):
-//   - We use expo-audio's `createAudioPlayer` (NOT the hook) because the
-//     audiobook player is a singleton that outlives any single screen.
-//   - One AudioPlayer instance lives for the whole reading session; for
-//     each new sentence we call `replace(uri)` instead of recreating the
-//     player. This keeps the lock-screen + media notification continuous.
-//   - `setActiveForLockScreen(true, meta)` is called ONCE at session
-//     start; subsequent sentences only call `updateLockScreenMetadata()`
-//     (which is essentially a no-op for our case since title/author do
-//     not change between sentences, but harmless).
+// Architecture (v2.2, post react-native-track-player migration):
+//   - One AudioPlayer instance PER SENTENCE. We re-create it on every
+//     playWav() call. The previous design re-used a singleton + replace()
+//     but expo-audio's Android ExoPlayer occasionally stalled when
+//     replace() was called immediately after a `didJustFinish` event
+//     (10+ second delays were observed in production logs). Re-creating
+//     the player guarantees a clean, "loaded" state with the source
+//     already attached in the constructor — play() returns instantly.
+//   - The MediaSession (lockscreen) is re-bound to the new player via
+//     setActiveForLockScreen(true, meta) on every sentence. On Android
+//     this is a single binder call (<10ms) and the lockscreen widget
+//     never disappears between sentences because the OS keeps the
+//     notification while a new player takes over.
+//   - The previous player is .remove()'d AFTER the new one has been
+//     created (and ideally after the new audio has started), so there
+//     is no gap. We also call .pause() on the old player to break any
+//     internal ExoPlayer queue before disposing.
 //
 // Per user spec: only Play / Pause on the lockscreen (no Stop). The OS
 // notification still has the standard swipe-to-dismiss to fully kill the
@@ -53,30 +60,26 @@ function notifyState(s: 'playing' | 'paused' | 'finished' | 'idle') {
   });
 }
 
-function ensurePlayer(): AudioPlayer {
-  if (!player) {
-    player = createAudioPlayer(null);
-    player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
-      // expo-audio fires this 2x/sec by default. We use the deltas to
-      // detect (a) natural end-of-sentence (didJustFinish) and (b) user
-      // play/pause taps from the lockscreen (playing flipped while we
-      // didn't issue play() / pause() ourselves — see PlayerContext for
-      // how those `wasIntentional` flags get reconciled).
-      if (status.didJustFinish && !lastDidFinish) {
-        lastDidFinish = true;
-        notifyState('finished');
-      } else if (status.playing !== lastPlaying) {
-        lastPlaying = status.playing;
-        notifyState(status.playing ? 'playing' : 'paused');
-        if (status.playing) {
-          remotePlayListeners.forEach((cb) => { try { cb(); } catch { /* ignore */ } });
-        } else if (!status.didJustFinish) {
-          remotePauseListeners.forEach((cb) => { try { cb(); } catch { /* ignore */ } });
-        }
+function attachListenersTo(p: AudioPlayer): void {
+  p.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+    // expo-audio fires this 2x/sec by default. We use the deltas to
+    // detect (a) natural end-of-sentence (didJustFinish) and (b) user
+    // play/pause taps from the lockscreen (playing flipped while we
+    // didn't issue play() / pause() ourselves — see PlayerContext for
+    // how those `wasIntentional` flags get reconciled).
+    if (status.didJustFinish && !lastDidFinish) {
+      lastDidFinish = true;
+      notifyState('finished');
+    } else if (status.playing !== lastPlaying) {
+      lastPlaying = status.playing;
+      notifyState(status.playing ? 'playing' : 'paused');
+      if (status.playing) {
+        remotePlayListeners.forEach((cb) => { try { cb(); } catch { /* ignore */ } });
+      } else if (!status.didJustFinish) {
+        remotePauseListeners.forEach((cb) => { try { cb(); } catch { /* ignore */ } });
       }
-    });
-  }
-  return player;
+    }
+  });
 }
 
 async function ensureAudioMode(): Promise<void> {
@@ -99,57 +102,61 @@ async function ensureAudioMode(): Promise<void> {
 // ---- Public API ----------------------------------------------------------
 
 /**
- * Load a synthesized WAV into the singleton player, attach lockscreen
- * metadata if this is the first call, and start playback. Resolves when
- * the audio finishes naturally OR when an external `stopPlayback()` is
- * called.
+ * Load a synthesized WAV into a fresh AudioPlayer instance, attach
+ * lockscreen metadata, and start playback. Resolves when the audio
+ * finishes naturally OR when an external `stopPlayback()` is called.
+ *
+ * v2.2: we CREATE a brand-new player here instead of calling
+ * replace() on a long-lived singleton. This dodges an ExoPlayer race
+ * (Android) where replace() right after didJustFinish caused 5-10s
+ * delays before the new clip actually started.
  */
 export async function playWav(wavPath: string, meta: SentenceMetadata): Promise<void> {
   await ensureAudioMode();
-  const p = ensurePlayer();
   const uri = wavPath.startsWith('file://') ? wavPath : `file://${wavPath}`;
 
-  // Reset finish detection for this clip.
+  // Reset finish detection for the new clip.
   lastDidFinish = false;
   lastPlaying = false;
 
-  // Either replace the current source or set it for the first time.
-  // `replace()` triggers a clean re-load of the new file path.
-  p.replace(uri);
-
-  // Lockscreen activation: only once per session, then just refresh meta.
-  if (!lockScreenActive) {
-    try {
-      const lockMeta: { title: string; artist: string; albumTitle?: string; artworkUrl?: string } = {
-        title: meta.bookTitle || 'Audiobook',
-        artist: meta.bookAuthor || '',
-      };
-      if (meta.voiceName) lockMeta.albumTitle = meta.voiceName;
-      if (meta.coverUrl) lockMeta.artworkUrl = meta.coverUrl;
-      p.setActiveForLockScreen(true, lockMeta);
-      lockScreenActive = true;
-      tracePiper('audio.lockscreen.on', `title="${lockMeta.title.slice(0, 40)}"`);
-    } catch (e: any) {
-      tracePiper('audio.lockscreen.err', `${e?.message || e}`);
-    }
-  } else if (
-    !lastMeta ||
-    lastMeta.bookTitle !== meta.bookTitle ||
-    lastMeta.bookAuthor !== meta.bookAuthor ||
-    lastMeta.coverUrl !== meta.coverUrl
-  ) {
-    // Different book/author/cover than before — refresh lockscreen.
-    try {
-      const lockMeta: { title: string; artist: string; albumTitle?: string; artworkUrl?: string } = {
-        title: meta.bookTitle || 'Audiobook',
-        artist: meta.bookAuthor || '',
-      };
-      if (meta.voiceName) lockMeta.albumTitle = meta.voiceName;
-      if (meta.coverUrl) lockMeta.artworkUrl = meta.coverUrl;
-      p.updateLockScreenMetadata(lockMeta);
-    } catch { /* ignore */ }
+  // Tear down the old player (if any) — this also detaches its listener
+  // so we don't get duplicate `playbackStatusUpdate` callbacks.
+  const previous = player;
+  player = null;
+  if (previous) {
+    try { previous.pause(); } catch { /* ignore */ }
+    // remove() is sync in expo-audio; queue it after the new player
+    // becomes active so the lockscreen never blinks.
+    setTimeout(() => { try { previous.remove(); } catch { /* ignore */ } }, 50);
   }
-  lastMeta = meta;
+
+  // Create a fresh player with the source already attached. ExoPlayer
+  // prepares the new source synchronously in the constructor (using the
+  // file:// URI), so by the time play() is called the source is ready.
+  const p = createAudioPlayer({ uri });
+  attachListenersTo(p);
+  player = p;
+  tracePiper('audio.player.create', `id=${(p as any).id ?? '?'} loaded=${p.isLoaded ?? '?'}`);
+
+  // Lockscreen activation — always (re)bind to the new player. expo-audio
+  // automatically transfers the MediaSession to the new owner so the
+  // notification widget stays visible across the swap.
+  try {
+    const lockMeta: { title: string; artist: string; albumTitle?: string; artworkUrl?: string } = {
+      title: meta.bookTitle || 'Audiobook',
+      artist: meta.bookAuthor || '',
+    };
+    if (meta.voiceName) lockMeta.albumTitle = meta.voiceName;
+    if (meta.coverUrl) lockMeta.artworkUrl = meta.coverUrl;
+    p.setActiveForLockScreen(true, lockMeta);
+    if (!lockScreenActive) {
+      tracePiper('audio.lockscreen.on', `title="${lockMeta.title.slice(0, 40)}"`);
+      lockScreenActive = true;
+    }
+    lastMeta = meta;
+  } catch (e: any) {
+    tracePiper('audio.lockscreen.err', `${e?.message || e}`);
+  }
 
   // Start playback.
   p.play();

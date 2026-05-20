@@ -266,31 +266,24 @@ export function getCurrentVoiceMeta(): VoiceMeta | null {
 }
 
 // =========================================================================
-// NNAPI EXECUTION PROVIDER OPT-IN
+// NNAPI EXECUTION PROVIDER — DEPRECATED in v2.2
+//
+// NNAPI was removed because it caused ORT_FAIL crashes on production
+// devices (Realme + MediaTek, Android 16). These two functions remain
+// so existing imports compile, but they're now no-ops: getUseNnapi()
+// always returns false and setUseNnapi() never enables anything.
 // =========================================================================
 
-/** Read the user's preference for the NNAPI execution provider. */
+/** Always false — NNAPI was removed in v2.2. */
 export async function getUseNnapi(): Promise<boolean> {
-  try {
-    const raw = await AsyncStorage.getItem(ASYNC_USE_NNAPI_KEY);
-    return raw === '1';
-  } catch {
-    return false;
-  }
+  return false;
 }
 
-/** Persist the user's NNAPI preference. Engine must reload to take effect. */
-export async function setUseNnapi(value: boolean): Promise<void> {
-  try {
-    await AsyncStorage.setItem(ASYNC_USE_NNAPI_KEY, value ? '1' : '0');
-    // Force engine reload on next play so the new option is honored.
-    ready = false;
-    loadedVoiceId = null;
-    initInFlight = null;
-    await trace('nnapi.set', `value=${value}`);
-  } catch {
-    /* ignore */
-  }
+/** No-op — NNAPI was removed in v2.2. Kept for source compatibility. */
+export async function setUseNnapi(_value: boolean): Promise<void> {
+  // Clear any leftover preference from older builds so the engine doesn't
+  // pick it up on next reload.
+  try { await AsyncStorage.setItem(ASYNC_USE_NNAPI_KEY, '0'); } catch { /* ignore */ }
 }
 
 // =========================================================================
@@ -477,13 +470,14 @@ async function doInitEngine(): Promise<boolean> {
 
     emitProgress('Inizializzazione motore ONNX...', 70, 'Microsoft ONNX Runtime');
     await trace('==PHASE.3==', 'native.loadVoice');
-    const useNnapi = await getUseNnapi();
-    await trace('phase3.opts', `useNnapi=${useNnapi}`);
+    // v2.2: NNAPI removed — it was causing ORT_FAIL crashes on multiple
+    // devices (notably Realme/MediaTek phones) and never provided
+    // measurable latency benefit. CPU + XNNPACK is the reliable path.
     const result = await native.loadVoice(
       stripFilePrefix(modelPath),
       configJson,
       stripFilePrefix(dataDir),
-      { useNnapi },
+      { useNnapi: false },
     );
     currentSampleRate = result.sampleRate;
     loadedVoiceId = voiceId;
@@ -567,28 +561,31 @@ function sanitizeForPiper(raw: string): string {
 
 // ---------------------------------------------------------------------------
 // PRE-BUFFER: a single slot that stores the synth result for the NEXT sentence
-// to be spoken. PlayerContext.playLoop pre-fires synthesis as soon as the
-// current sentence enters the audio stage, so by the time the audio finishes
-// the next sentence's WAV is already on disk. Drops the inter-sentence gap
-// from ~250-400ms to <50ms.
+// to be spoken. Filled at the END of a speakSentence() call (just after we've
+// consumed the previous prebuffer for the current sentence). This timing is
+// crucial: the prebuffer is queued AFTER the slot has been emptied, so we
+// never race against ourselves.
 //
 // Lifecycle:
-//   prebufferSentence(text) -> stores { text, path }
-//   speakSentence(text)     -> if buffer.text == text, use buffer.path; clear.
-//                              if buffer.text != text, drop the stale WAV.
-//   stopSpeak()             -> always drops the buffer.
+//   speakSentence(text)
+//     -> if preBuffered.text == text  : use the WAV, clear the slot.
+//     -> else                          : synth fresh; if there's a stale
+//                                        prebuffer in the slot, drop it.
+//     -> at the end: if a nextText hint was supplied, kick a new prebuffer.
+//   stopSpeak()                          -> drops the buffer (in-flight too).
 //
-// RACE CONDITION (fixed v2.1): two prebuffer calls in a row used to drop
-// each other's WAVs because the second call's `await preBufferInFlight`
-// would settle AFTER the in-flight job had already assigned `preBuffered`
-// to its (now stale) text. We now track the LATEST desired text and let
-// the completing job self-check before writing into `preBuffered`. Stale
-// results are deleted immediately instead of cascading into `text-mismatch`
-// drops at the next call site.
+// The OLD design (v2.1) had the PlayerContext.playLoop queue the prebuffer
+// at the START of each iteration. That worked the first time but on the
+// second iteration the queued prebuffer for sentences[k+2] would race
+// against the still-in-flight prebuffer for sentences[k+1] and our race-
+// detection logic would drop the valid k+1 result, defeating the purpose.
+// Moving the queueing INSIDE speakSentence eliminates the race because by
+// then the previous prebuffer has either been consumed (slot empty) or
+// dropped explicitly (still empty), and exactly ONE new prebuffer goes
+// into the slot per sentence boundary.
 // ---------------------------------------------------------------------------
 let preBuffered: { text: string; path: string } | null = null;
 let preBufferInFlight: Promise<void> | null = null;
-let preBufferDesired: string | null = null;
 
 async function dropPreBuffer(reason: string): Promise<void> {
   if (!preBuffered) return;
@@ -605,39 +602,42 @@ async function dropPreBuffer(reason: string): Promise<void> {
  * Synthesize a sentence in the background so the next call to speakSentence
  * can use the result immediately. Returns when synth completes (or fails
  * silently); callers should NOT await this — fire-and-forget.
+ *
+ * v2.2: the caller (speakSentence) only ever invokes this AFTER the slot
+ * has been consumed/cleared, so we don't need the desired-text tracker
+ * any more. We do still guard against re-entry while a synth is in-flight
+ * (an external `stopSpeak()` followed by an immediate resume could lead to
+ * two prebuffers running in parallel otherwise).
  */
 export async function prebufferSentence(text: string, lengthScale: number): Promise<void> {
   const native = getPiperNative();
   if (!native || !ready) return;
   const clean = sanitizeForPiper(text);
   if (!clean) return;
-  // Record the LATEST desired text so the in-flight job (if any) can
-  // self-check before assigning preBuffered. This is the heart of the
-  // race-condition fix.
-  preBufferDesired = clean;
-  // If we already have a buffer for THIS text, nothing to do.
+  // If we already have a buffer for THIS exact text, nothing to do.
   if (preBuffered && preBuffered.text === clean) return;
-  // Drop any stale (different-text) buffer before starting a new synth.
-  if (preBuffered && preBuffered.text !== clean) {
-    await dropPreBuffer('text-mismatch');
-  }
-  // Coalesce concurrent calls — if another synth is already running, just
-  // record the new desired text and let the in-flight job pick it up. If
-  // when it completes the desiredText has moved on, the job will drop its
-  // result and we will queue a fresh synth from the next call.
+  // If a synth is already running, just bail — the caller knows the slot
+  // is being filled; spamming new requests would only cause race drops.
   if (preBufferInFlight) {
-    await trace('prebuf.coalesce', `desired=${clean.slice(0, 40)}`);
+    await trace('prebuf.busy', `desired=${clean.slice(0, 40)}`);
     return;
+  }
+  // If the slot is holding a stale (different) text, drop it so the new
+  // synth has a clean place to land. Should be rare — speakSentence
+  // explicitly drops on a miss before calling us.
+  if (preBuffered && preBuffered.text !== clean) {
+    await dropPreBuffer('replaced');
   }
   const speed = Math.max(0.5, Math.min(2.0, 1 / lengthScale));
   const job = (async () => {
     try {
       await trace('prebuf.synth', `len=${clean.length} speed=${speed.toFixed(2)}`);
       const result = await native.synthesizeToFile(clean, 0, speed);
-      // Self-check: did the desired text move on while we were busy?
-      // If yes, our WAV is stale — delete it immediately.
-      if (preBufferDesired !== clean) {
-        await trace('prebuf.stale', `synth=${clean.slice(0, 30)} desired=${(preBufferDesired || '').slice(0, 30)}`);
+      // If a stopSpeak() came in while we were synthesizing, the engine is
+      // not "ready" any more — discard the WAV instead of populating the
+      // slot.
+      if (!ready) {
+        await trace('prebuf.cancelled', `synth=${clean.slice(0, 30)}`);
         try { await native.deleteWavFile(result.path); } catch { /* ignore */ }
         return;
       }
@@ -647,13 +647,6 @@ export async function prebufferSentence(text: string, lengthScale: number): Prom
       await trace('prebuf.error', `${e?.message || e}`);
     } finally {
       preBufferInFlight = null;
-      // If the user asked for a NEW text while we were running, kick a
-      // fresh synth for that one now (won't recurse — only one job at a
-      // time thanks to preBufferInFlight).
-      const next = preBufferDesired;
-      if (next && next !== clean && ready) {
-        prebufferSentence(next, lengthScale).catch(() => { /* ignore */ });
-      }
     }
   })();
   preBufferInFlight = job;
@@ -673,11 +666,16 @@ export async function prebufferSentence(text: string, lengthScale: number): Prom
  * @param text         the raw sentence text to read
  * @param lengthScale  Piper length_scale; speed = 1 / lengthScale
  * @param meta         optional override for lockscreen title/artist/album
+ * @param nextText     v2.2 — optional hint: the next sentence the caller
+ *                     will speak. We schedule a background prebuffer for
+ *                     it ONCE the current slot has been consumed (so no
+ *                     race against the in-flight buffer for THIS sentence).
  */
 export async function speakSentence(
   text: string,
   lengthScale: number,
   meta?: Partial<SentenceMetadata>,
+  nextText?: string | null,
 ): Promise<void> {
   const native = getPiperNative();
   if (!native || !ready) {
@@ -710,7 +708,16 @@ export async function speakSentence(
       await trace('speak.wav', `${result.path.split('/').pop()} ${Math.round(result.durationMs)}ms (synth=${Math.round(result.synthMs)}ms)`);
     }
 
-    // 2. Hand off to expo-audio. playWav() resolves when the clip ends
+    // 2. v2.2 — NOW the prebuffer slot is empty (we just emptied it),
+    //    so we can safely queue the synthesis of the NEXT sentence in
+    //    the background. By the time the audio.play of THIS clip ends,
+    //    the next clip's WAV will be on disk.
+    if (nextText) {
+      // Fire-and-forget — never awaited.
+      prebufferSentence(nextText, lengthScale).catch(() => { /* ignore */ });
+    }
+
+    // 3. Hand off to expo-audio. playWav() resolves when the clip ends
     //    naturally (didJustFinish) or when stopPlayback() is called.
     const sentenceMeta: SentenceMetadata = {
       bookTitle: meta?.bookTitle || 'Audiobook',
@@ -757,9 +764,9 @@ export async function stopSpeak(): Promise<void> {
     await trace('stop.call', 'native.stopPlayback + expo-audio.stop');
     if (native) await native.stopPlayback().catch(() => {});
     await stopPlayback();
-    // Clear pre-buffer state — any in-flight synth job will see the
-    // null desired-text and discard its result.
-    preBufferDesired = null;
+    // Drop the prebuffer slot. Any in-flight synth job will see ready=false
+    // (set by reloadEngine/setUseNnapi) or just be ignored — its WAV will
+    // be discarded by prebufferSentence's `if (!ready)` self-check.
     await dropPreBuffer('stop');
     if (native) await native.cleanupWavCache().catch(() => {});
     await trace('stop.call', 'OK');

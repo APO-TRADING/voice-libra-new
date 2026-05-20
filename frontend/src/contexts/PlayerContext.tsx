@@ -157,7 +157,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   // RESOLVES WITHOUT FALLING BACK to the system TTS (per spec — the device
   // voice must NEVER speak). On failure we just stop the playback loop and
   // surface the error in the UI via setEngine('error').
-  const speakOne = useCallback(async (idx: number, gen: number): Promise<void> => {
+  //
+  // v2.2: also receives nextText hint so piperEngine can pre-buffer the
+  // next sentence AFTER the current one's buffer slot has been consumed
+  // (avoids the prebuf.drop:text-mismatch race the previous design had).
+  const speakOne = useCallback(async (idx: number, gen: number, nextText: string | null): Promise<void> => {
     const list = sentencesRef.current;
     if (idx < 0 || idx >= list.length) return;
     const text = list[idx];
@@ -187,7 +191,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         bookTitle: titleRef.current || 'Audiobook',
         bookAuthor: authorRef.current || '',
         coverUrl: tpCover,
-      });
+      }, nextText);
       // Success → reset failure counter; status stays 'piper'.
       if (piperFailCountRef.current > 0) piperFailCountRef.current = 0;
       setEngine((prev) => (prev === 'piper' ? prev : 'piper'));
@@ -219,25 +223,31 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     pausedRef.current = false;
     setIsPlaying(true);
 
+    // Kick off the FIRST pre-buffer manually (the in-loop prebuffer is
+    // driven by speakSentence's nextText param, but for the very first
+    // sentence we need to seed the buffer with sentence[startIdx+1] so
+    // that by the time the first audio.play ends, sentence+1 is ready).
+    const seedIdx = startIdx + 1;
+    if (seedIdx < sentencesRef.current.length) {
+      const seedText = sentencesRef.current[seedIdx];
+      piperPrebuffer(seedText, lengthScaleRef.current).catch(() => { /* ignore */ });
+    }
+
     let cur = startIdx;
     while (playingRef.current && gen === generationRef.current && cur < sentencesRef.current.length) {
       setIndex(cur);
       indexRef.current = cur;
       queueSave(cur);
 
-      // PRE-BUFFER NEXT SENTENCE: kick off synthesis of sentence cur+1 in the
-      // background while the current one plays. The native module queues
-      // synth jobs internally; by the time the current sentence's audio
-      // finishes, the next WAV is usually ready on disk so the gap drops
-      // from ~300ms to <50ms. Fire-and-forget; speakOne checks the buffer
-      // when it gets to that index.
+      // Pass the NEXT sentence text to speakOne so piperEngine can queue
+      // the prebuffer at the right moment (after consuming the current
+      // slot). This is the v2.2 fix for prebuf.drop:text-mismatch.
       const nextIdx = cur + 1;
-      if (nextIdx < sentencesRef.current.length) {
-        const nextText = sentencesRef.current[nextIdx];
-        piperPrebuffer(nextText, lengthScaleRef.current).catch(() => { /* ignore */ });
-      }
+      const nextText = nextIdx < sentencesRef.current.length
+        ? sentencesRef.current[nextIdx]
+        : null;
 
-      await speakOne(cur, gen);
+      await speakOne(cur, gen, nextText);
       if (gen !== generationRef.current) return;
       // If the user soft-paused mid-sentence, playingRef will be false
       // BUT pausedRef will be true — DON'T exit the loop; keep awaiting

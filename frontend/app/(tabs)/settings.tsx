@@ -1,5 +1,5 @@
 import Slider from '@react-native-community/slider';
-import { AlertCircle, AlertTriangle, Check, Copy, Cpu, Mic, Moon, Play, Plus, RefreshCw, Sparkles, Sun, Trash2, X, Volume2 } from 'lucide-react-native';
+import { AlertCircle, AlertTriangle, Check, Copy, Cpu, Mic, Moon, Play, Plus, RefreshCw, Sun, Trash2, X, Volume2 } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Clipboard, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -8,7 +8,6 @@ import {
   decodePiperError,
   DiagnosticItem,
   getCurrentVoiceId,
-  getUseNnapi,
   initEngine,
   isPiperReady,
   listAllVoices,
@@ -17,7 +16,6 @@ import {
   reloadEngine,
   runFullDiagnostics,
   setCurrentVoiceId,
-  setUseNnapi,
   speakSentence,
 } from '../../src/audio/piperEngine';
 import type { VoiceMeta } from '../../src/audio/piperAssets';
@@ -46,10 +44,6 @@ export default function SettingsScreen() {
   const [voiceSwitching, setVoiceSwitching] = useState(false);
   const [testRunning, setTestRunning] = useState(false);
   const [importing, setImporting] = useState(false);
-  // PATCH (v2.1): NNAPI execution provider opt-in. Re-loaded from
-  // AsyncStorage on mount; toggling forces a fresh engine load on next play.
-  const [useNnapi, setUseNnapiState] = useState<boolean>(false);
-  const [nnapiSwitching, setNnapiSwitching] = useState(false);
 
   const activeVoiceMeta = voices.find((v) => v.id === activeVoiceId) || null;
 
@@ -73,7 +67,6 @@ export default function SettingsScreen() {
   useEffect(() => {
     (async () => {
       try { setActiveVoiceId(await getCurrentVoiceId()); } catch { /* ignore */ }
-      try { setUseNnapiState(await getUseNnapi()); } catch { /* ignore */ }
       await refreshVoiceCatalog();
     })();
   }, [refreshVoiceCatalog]);
@@ -219,33 +212,6 @@ export default function SettingsScreen() {
       refreshTrace();
     }
   }, [refreshTrace]);
-
-  // PATCH (v2.1): toggle the NNAPI execution provider. Persists to
-  // AsyncStorage and forces a full engine reload so the new option is
-  // picked up on the next synth. We re-read the value back from disk
-  // after the round-trip so UI state always reflects the source of truth.
-  const handleToggleNnapi = useCallback(async (next: boolean) => {
-    setNnapiSwitching(true);
-    try {
-      await setUseNnapi(next);
-      setUseNnapiState(next);
-      // Best-effort reload; if it fails (e.g. NNAPI unsupported on this
-      // device) we silently revert. The engine init log will surface the
-      // real reason in the diagnostics screen.
-      try {
-        await reloadEngine();
-      } catch (e: any) {
-        Alert.alert(t('common.error'), String(e?.message || e));
-        // Roll back the persisted flag so the next play doesn't keep
-        // hitting the same NNAPI failure.
-        await setUseNnapi(false).catch(() => {});
-        setUseNnapiState(false);
-      }
-      refreshTrace();
-    } finally {
-      setNnapiSwitching(false);
-    }
-  }, [refreshTrace, t]);
 
   const piperReady = engine === 'piper';
 
@@ -530,29 +496,6 @@ export default function SettingsScreen() {
                     : t('settings.tts.status.error.desc')}
             </Text>
           </View>
-        </View>
-        <View style={[styles.divider, { backgroundColor: colors.border }]} />
-        {/* PATCH (v2.1): NNAPI execution provider toggle. */}
-        <View style={styles.row}>
-          <View style={[styles.iconCircle, { backgroundColor: colors.surface2 }]}>
-            <Sparkles color={useNnapi ? colors.primaryActive : colors.textSecondary} size={18} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.rowTitle, { color: colors.textPrimary }]}>
-              {t('settings.nnapi.label')}
-            </Text>
-            <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>
-              {t('settings.nnapi.desc')}
-            </Text>
-          </View>
-          <Switch
-            testID="nnapi-switch"
-            value={useNnapi}
-            onValueChange={handleToggleNnapi}
-            disabled={nnapiSwitching}
-            trackColor={{ true: colors.primaryActive, false: colors.border }}
-            thumbColor={colors.surface}
-          />
         </View>
       </View>
 

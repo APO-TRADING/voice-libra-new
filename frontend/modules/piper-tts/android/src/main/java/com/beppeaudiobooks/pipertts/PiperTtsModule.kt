@@ -61,10 +61,17 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
    */
   @ReactMethod
   fun loadVoice(modelPath: String, configJson: String, espeakDataPath: String, options: ReadableMap?, promise: Promise) {
-    val useNnapi = options?.let { if (it.hasKey("useNnapi")) it.getBoolean("useNnapi") else false } ?: false
+    // v2.2: NNAPI execution provider removed — it caused ORT_FAIL crashes
+    // on production devices (Realme/MediaTek phones on Android 16). We
+    // still accept the `options` ReadableMap for forwards-compat with the
+    // JS API, but the useNnapi flag is now silently ignored — the engine
+    // always runs on the CPU EP with XNNPACK acceleration, which is the
+    // path Microsoft + the Piper community recommend for VITS inference.
+    @Suppress("UNUSED_VARIABLE")
+    val ignoredUseNnapi = options?.let { if (it.hasKey("useNnapi")) it.getBoolean("useNnapi") else false } ?: false
     ttsScope.launch {
       try {
-        val out = doLoadVoice(modelPath, configJson, espeakDataPath, useNnapi)
+        val out = doLoadVoice(modelPath, configJson, espeakDataPath)
         promise.resolve(out)
       } catch (e: Throwable) {
         Log.e(TAG, "loadVoice failed", e)
@@ -73,7 +80,7 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
     }
   }
 
-  private suspend fun doLoadVoice(modelPath: String, configJson: String, espeakDataPath: String, useNnapi: Boolean): WritableMap {
+  private suspend fun doLoadVoice(modelPath: String, configJson: String, espeakDataPath: String): WritableMap {
     Log.i(TAG, "doLoadVoice model=$modelPath espeakData=$espeakDataPath useNnapi=$useNnapi")
     if (!File(modelPath).exists()) {
       throw IllegalArgumentException("model.onnx not found at $modelPath")
@@ -141,10 +148,11 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
           "-PwithNativePhonemizer=true to enable native espeak-ng.")
     }
 
-    // Build ORT session
+    // Build ORT session — CPU + XNNPACK only (NNAPI removed in v2.2 due
+    // to ORT_FAIL crashes on Realme/MediaTek Android 16 devices).
     val previous = engineRef.getAndSet(null)
     previous?.close()
-    val engine = withContext(Dispatchers.IO) { OnnxEngine(modelPath, voice, useNnapi) }
+    val engine = withContext(Dispatchers.IO) { OnnxEngine(modelPath, voice) }
     engineRef.set(engine)
     voiceRef.set(voice)
 
