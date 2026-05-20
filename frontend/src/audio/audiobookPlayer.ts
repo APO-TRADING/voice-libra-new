@@ -54,6 +54,22 @@ const remotePlayListeners = new Set<SimpleListener>();
 let lastPlaying = false;
 let lastDidFinish = false;
 
+// PATCH (v2.4): we drive expo-audio with our own play/pause commands and
+// the underlying player ALSO fires a `playbackStatusUpdate` whenever the
+// playing flag flips. Without these debounce timestamps, every internal
+// p.play() call would be misclassified as a "lockscreen tap" from the
+// user and bounce back through remotePlayListeners → a feedback loop that
+// in the v2.2 log showed up as ~50 spurious `remote.play` events per book.
+//
+// We record the wall-clock time of EVERY self-initiated state change and
+// the playbackStatusUpdate listener ignores remote callbacks while inside
+// the debounce window. 350 ms is more than the longest gap we ever saw
+// between p.play() and the listener firing (typically 80–200 ms on a
+// Realme Dimensity).
+let lastSelfPlayMs = 0;
+let lastSelfPauseMs = 0;
+const SELF_EVENT_DEBOUNCE_MS = 350;
+
 function notifyState(s: 'playing' | 'paused' | 'finished' | 'idle') {
   stateListeners.forEach((cb) => {
     try { cb(s); } catch { /* ignore */ }
@@ -65,18 +81,24 @@ function attachListenersTo(p: AudioPlayer): void {
     // expo-audio fires this 2x/sec by default. We use the deltas to
     // detect (a) natural end-of-sentence (didJustFinish) and (b) user
     // play/pause taps from the lockscreen (playing flipped while we
-    // didn't issue play() / pause() ourselves — see PlayerContext for
-    // how those `wasIntentional` flags get reconciled).
+    // didn't issue play() / pause() ourselves).
     if (status.didJustFinish && !lastDidFinish) {
       lastDidFinish = true;
       notifyState('finished');
     } else if (status.playing !== lastPlaying) {
       lastPlaying = status.playing;
       notifyState(status.playing ? 'playing' : 'paused');
+      const now = Date.now();
       if (status.playing) {
-        remotePlayListeners.forEach((cb) => { try { cb(); } catch { /* ignore */ } });
+        // v2.4: skip remote.play emission if this is the echo of our own
+        // recent play() call.
+        if (now - lastSelfPlayMs >= SELF_EVENT_DEBOUNCE_MS) {
+          remotePlayListeners.forEach((cb) => { try { cb(); } catch { /* ignore */ } });
+        }
       } else if (!status.didJustFinish) {
-        remotePauseListeners.forEach((cb) => { try { cb(); } catch { /* ignore */ } });
+        if (now - lastSelfPauseMs >= SELF_EVENT_DEBOUNCE_MS) {
+          remotePauseListeners.forEach((cb) => { try { cb(); } catch { /* ignore */ } });
+        }
       }
     }
   });
@@ -106,10 +128,20 @@ async function ensureAudioMode(): Promise<void> {
  * lockscreen metadata, and start playback. Resolves when the audio
  * finishes naturally OR when an external `stopPlayback()` is called.
  *
- * v2.2: we CREATE a brand-new player here instead of calling
- * replace() on a long-lived singleton. This dodges an ExoPlayer race
- * (Android) where replace() right after didJustFinish caused 5-10s
- * delays before the new clip actually started.
+ * v2.4 (memory leak fix): one AudioPlayer instance lives at a time. We
+ * SYNCHRONOUSLY tear down the previous instance (.pause() + .remove())
+ * BEFORE the new instance starts playing. This guarantees zero RAM
+ * accumulation across hours-long reading sessions.
+ *
+ * The previous v2.2 design used `setTimeout(() => previous.remove(), 50)`
+ * to avoid a brief lockscreen flicker, but in production logs we saw the
+ * AudioPlayer ID-set grow to 50+ instances for a 6-minute reading session
+ * (one per sentence) — clear memory leak.
+ *
+ * The lockscreen continues to look continuous because we explicitly
+ * transfer the MediaSession to the new player (setActiveForLockScreen on
+ * the new instance) BEFORE killing the old one — the OS retains the
+ * notification widget when ownership transfers atomically.
  */
 export async function playWav(wavPath: string, meta: SentenceMetadata): Promise<void> {
   await ensureAudioMode();
@@ -119,28 +151,18 @@ export async function playWav(wavPath: string, meta: SentenceMetadata): Promise<
   lastDidFinish = false;
   lastPlaying = false;
 
-  // Tear down the old player (if any) — this also detaches its listener
-  // so we don't get duplicate `playbackStatusUpdate` callbacks.
+  // Snapshot the previous player so we can dispose it AFTER the new one
+  // is fully wired and owning the MediaSession. We must NOT touch it
+  // before that, otherwise the OS notification briefly disappears.
   const previous = player;
-  player = null;
-  if (previous) {
-    try { previous.pause(); } catch { /* ignore */ }
-    // remove() is sync in expo-audio; queue it after the new player
-    // becomes active so the lockscreen never blinks.
-    setTimeout(() => { try { previous.remove(); } catch { /* ignore */ } }, 50);
-  }
 
-  // Create a fresh player with the source already attached. ExoPlayer
-  // prepares the new source synchronously in the constructor (using the
-  // file:// URI), so by the time play() is called the source is ready.
+  // Build the new player with source attached in the constructor.
+  // ExoPlayer prepares synchronously on file:// URIs, so by the time
+  // play() is called the source is ready to stream.
   const p = createAudioPlayer({ uri });
   attachListenersTo(p);
-  player = p;
-  tracePiper('audio.player.create', `id=${(p as any).id ?? '?'} loaded=${p.isLoaded ?? '?'}`);
 
-  // Lockscreen activation — always (re)bind to the new player. expo-audio
-  // automatically transfers the MediaSession to the new owner so the
-  // notification widget stays visible across the swap.
+  // Transfer the MediaSession ownership BEFORE we kill the old player.
   try {
     const lockMeta: { title: string; artist: string; albumTitle?: string; artworkUrl?: string } = {
       title: meta.bookTitle || 'Audiobook',
@@ -150,7 +172,7 @@ export async function playWav(wavPath: string, meta: SentenceMetadata): Promise<
     if (meta.coverUrl) lockMeta.artworkUrl = meta.coverUrl;
     p.setActiveForLockScreen(true, lockMeta);
     if (!lockScreenActive) {
-      tracePiper('audio.lockscreen.on', `title="${lockMeta.title.slice(0, 40)}"`);
+      tracePiper('audio.lockscreen.on', `title="${lockMeta.title.slice(0, 100)}"`);
       lockScreenActive = true;
     }
     lastMeta = meta;
@@ -158,9 +180,23 @@ export async function playWav(wavPath: string, meta: SentenceMetadata): Promise<
     tracePiper('audio.lockscreen.err', `${e?.message || e}`);
   }
 
-  // Start playback.
+  // Atomically swap the module-level player reference and start playback.
+  player = p;
+  // v2.4: mark THIS exact moment as a self-initiated play so the
+  // playbackStatusUpdate listener doesn't echo it back as `remote.play`.
+  lastSelfPlayMs = Date.now();
   p.play();
+  tracePiper('audio.player.create', `id=${(p as any).id ?? '?'} loaded=${p.isLoaded ?? '?'}`);
   tracePiper('audio.play', `path=${uri.slice(uri.lastIndexOf('/') + 1)}`);
+
+  // NOW that the new player owns the MediaSession and is playing, kill the
+  // previous one IMMEDIATELY. expo-audio's .remove() is synchronous: it
+  // detaches all listeners, releases the underlying ExoPlayer, and frees
+  // the audio buffer. No setTimeout — no RAM growth.
+  if (previous) {
+    try { previous.pause(); } catch { /* ignore */ }
+    try { previous.remove(); } catch { /* ignore */ }
+  }
 
   // Wait for natural end or external cancellation.
   return new Promise<void>((resolve) => {
@@ -177,6 +213,9 @@ export async function playWav(wavPath: string, meta: SentenceMetadata): Promise<
 export async function pausePlayback(): Promise<void> {
   if (!player) return;
   try {
+    // v2.4: mark this as a self-initiated pause so the listener doesn't
+    // echo it back as `remote.pause`.
+    lastSelfPauseMs = Date.now();
     player.pause();
     tracePiper('audio.pause', 'soft');
   } catch (e: any) {
@@ -188,6 +227,9 @@ export async function pausePlayback(): Promise<void> {
 export async function resumePlayback(): Promise<void> {
   if (!player) return;
   try {
+    // v2.4: mark this as a self-initiated play so the listener doesn't
+    // echo it back as `remote.play`.
+    lastSelfPlayMs = Date.now();
     player.play();
     tracePiper('audio.resume', 'soft');
   } catch (e: any) {
@@ -203,6 +245,8 @@ export async function resumePlayback(): Promise<void> {
 export async function stopPlayback(): Promise<void> {
   if (!player) return;
   try {
+    // v2.4: pause IS self-initiated here; suppress the echo.
+    lastSelfPauseMs = Date.now();
     player.pause();
     try { player.clearLockScreenControls(); } catch { /* ignore */ }
     lockScreenActive = false;

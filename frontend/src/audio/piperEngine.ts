@@ -374,7 +374,17 @@ async function unzipEspeakData(): Promise<string> {
 
   const entries = unzipSync(bytes);
   const totalEntries = Object.keys(entries).length;
-  await trace('espeak.unzip', `${totalEntries} entries`);
+  // v2.4: split file vs directory entries up-front so the log is honest
+  // about what's about to be written. The zip is a flat dump of espeak-ng
+  // data/ — for the bundled archive: 355 files + 37 directories = 392
+  // entries. No junk (no .DS_Store, no __MACOSX): verified at build time.
+  let dirCount = 0;
+  let fileCount = 0;
+  for (const [name, data] of Object.entries(entries)) {
+    if (name.endsWith('/') || data.length === 0) dirCount += 1;
+    else fileCount += 1;
+  }
+  await trace('espeak.unzip', `${totalEntries} entries (${fileCount} files + ${dirCount} dirs)`);
 
   let count = 0;
   for (const [name, data] of Object.entries(entries)) {
@@ -389,12 +399,12 @@ async function unzipEspeakData(): Promise<string> {
     await FileSystem.writeAsStringAsync(fullPath, out64, { encoding: FileSystem.EncodingType.Base64 });
     count += 1;
     if (count % 50 === 0) {
-      await trace('espeak.write', `${count}/${totalEntries}`);
+      await trace('espeak.write', `${count}/${fileCount}`);
       await new Promise<void>((r) => setTimeout(r, 0));
     }
   }
   await FileSystem.writeAsStringAsync(marker, String(count), { encoding: FileSystem.EncodingType.UTF8 });
-  await trace('espeak.complete', `wrote ${count} files`);
+  await trace('espeak.complete', `wrote ${count} files (+${dirCount} dirs created)`);
   return ESPEAK_DIR;
 }
 

@@ -283,7 +283,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       piperResume().catch(() => { /* ignore */ });
       return;
     }
-    tracePiper('play.tap', `idx=${indexRef.current}/${sentencesRef.current.length} title="${titleRef.current.slice(0, 40)}"`);
+    tracePiper('play.tap', `idx=${indexRef.current}/${sentencesRef.current.length} title="${titleRef.current.slice(0, 100)}"`);
     // PATCH (beppe-audiobooks v5): reset the consecutive-fail counter on
     // every fresh play() press so a new session always tries Piper first.
     piperFailCountRef.current = 0;
@@ -417,7 +417,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       titleRef.current = book.title;
       authorRef.current = book.author || null;
       coverUrlRef.current = book.cover_url || null;
-      tracePiper('load.ok', `title="${book.title.slice(0, 40)}" sentences=${book.sentences?.length || 0} startIdx=${startIdx}`);
+      tracePiper('load.ok', `title="${book.title.slice(0, 120)}" sentences=${book.sentences?.length || 0} startIdx=${startIdx}`);
     } catch (e: any) {
       tracePiper('load.err', String(e?.message || e));
       throw e;
