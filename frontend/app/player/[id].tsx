@@ -176,18 +176,29 @@ export default function Player() {
 
   return (
     <View style={[styles.c, { backgroundColor: colors.background }]} testID="player-screen">
+      {/* v2.5 (cosmetic): the cover thumbnail is now embedded inside the
+          top bar next to the title, freeing ~180px of vertical space for
+          the text. The full cover is still available on the library
+          card; here we just need a compact identity strip so the user
+          knows which book they're reading. */}
       <View style={[styles.topBar, { paddingTop: insets.top + 8 }]}>
         <TouchableOpacity onPress={() => router.back()} testID="player-back" style={[styles.iconBtn, { borderColor: colors.border }]}>
           <ChevronLeft color={colors.textPrimary} size={20} />
         </TouchableOpacity>
-        <Text numberOfLines={1} style={[styles.topTitle, { color: colors.textPrimary }]}>{player.title}</Text>
+        <Image source={{ uri: coverUrl || FALLBACK }} style={styles.topCover} />
+        <View style={styles.topTitleWrap}>
+          <Text numberOfLines={2} style={[styles.topTitle, { color: colors.textPrimary }]}>
+            {player.title}
+          </Text>
+          {player.author ? (
+            <Text numberOfLines={1} style={[styles.topAuthor, { color: colors.textSecondary }]}>
+              {player.author}
+            </Text>
+          ) : null}
+        </View>
         <TouchableOpacity onPress={() => setMenuOpen(true)} testID="player-menu" style={[styles.iconBtn, { borderColor: colors.border }]}>
           <MoreVertical color={colors.textPrimary} size={20} />
         </TouchableOpacity>
-      </View>
-
-      <View style={styles.heroWrap}>
-        <Image source={{ uri: coverUrl || FALLBACK }} style={styles.heroCover} />
       </View>
 
       <ScrollView
@@ -386,9 +397,12 @@ const styles = StyleSheet.create({
   c: { flex: 1 },
   topBar: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingBottom: 12 },
   iconBtn: { width: 40, height: 40, borderRadius: 999, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
-  topTitle: { flex: 1, fontSize: 16, fontWeight: '700', textAlign: 'center' },
-  heroWrap: { alignItems: 'center', paddingVertical: 8 },
-  heroCover: { width: 120, height: 180, borderRadius: 14 },
+  // v2.5: compact cover thumbnail inline with the title — frees ~180px
+  // of vertical space versus the old 120×180 hero card.
+  topCover: { width: 44, height: 66, borderRadius: 8 },
+  topTitleWrap: { flex: 1, justifyContent: 'center' },
+  topTitle: { fontSize: 15, fontWeight: '700', textAlign: 'left' },
+  topAuthor: { fontSize: 12, opacity: 0.75, marginTop: 2 },
   textWrap: { flex: 1 },
   sent: { fontSize: 18, lineHeight: 28, paddingVertical: 2, paddingHorizontal: 4, borderRadius: 6 },
   windowHint: { fontSize: 12, opacity: 0.5, textAlign: 'center', paddingVertical: 12, fontStyle: 'italic' },
