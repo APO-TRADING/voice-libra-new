@@ -22,7 +22,6 @@ import {
   initEngine,
   isPiperReady,
   speakSentence as piperSpeak,
-  prebufferSentence as piperPrebuffer,
   stopSpeak as piperStop,
   pauseSpeak as piperPause,
   resumeSpeak as piperResume,
@@ -223,15 +222,13 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     pausedRef.current = false;
     setIsPlaying(true);
 
-    // Kick off the FIRST pre-buffer manually (the in-loop prebuffer is
-    // driven by speakSentence's nextText param, but for the very first
-    // sentence we need to seed the buffer with sentence[startIdx+1] so
-    // that by the time the first audio.play ends, sentence+1 is ready).
-    const seedIdx = startIdx + 1;
-    if (seedIdx < sentencesRef.current.length) {
-      const seedText = sentencesRef.current[seedIdx];
-      piperPrebuffer(seedText, lengthScaleRef.current).catch(() => { /* ignore */ });
-    }
+    // v2.2: NO seed prebuffer — speakSentence handles all prebuffering
+    // internally via its nextText parameter. Seeding here would cause a
+    // duplicate synth for sentences[startIdx+1] (one fired here, one
+    // queued by speakSentence after consuming the first slot). The first
+    // sentence ALWAYS synthesizes fresh (~500ms on most phones); from
+    // the second sentence onwards the prebuffer hits because speakSentence
+    // queues the next one right after consuming the current slot.
 
     let cur = startIdx;
     while (playingRef.current && gen === generationRef.current && cur < sentencesRef.current.length) {

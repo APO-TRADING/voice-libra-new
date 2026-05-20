@@ -81,7 +81,7 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
   }
 
   private suspend fun doLoadVoice(modelPath: String, configJson: String, espeakDataPath: String): WritableMap {
-    Log.i(TAG, "doLoadVoice model=$modelPath espeakData=$espeakDataPath useNnapi=$useNnapi")
+    Log.i(TAG, "doLoadVoice model=$modelPath espeakData=$espeakDataPath EP=CPU")
     if (!File(modelPath).exists()) {
       throw IllegalArgumentException("model.onnx not found at $modelPath")
     }
