@@ -697,6 +697,27 @@ export async function speakSentence(
       wavPath = preBuffered.path;
       preBuffered = null;
       await trace('speak.prebuf.hit', `${wavPath.split('/').pop()}`);
+    } else if (preBufferInFlight) {
+      // v2.3: an in-flight prebuffer is running — it might be for THIS
+      // exact text (common when the previous audio clip was very short).
+      // Wait for it instead of dropping it and starting a fresh synth:
+      // worst case adds ~200-500ms but avoids a wasted CPU burst AND
+      // eliminates the inter-sentence gap.
+      await trace('speak.prebuf.wait', `len=${clean.length}`);
+      try { await preBufferInFlight; } catch { /* ignore */ }
+      if (preBuffered && preBuffered.text === clean) {
+        wavPath = preBuffered.path;
+        preBuffered = null;
+        await trace('speak.prebuf.hit-after-wait', `${wavPath.split('/').pop()}`);
+      } else {
+        if (preBuffered) await dropPreBuffer('miss-after-wait');
+        await trace('speak.synth', `len=${clean.length} speed=${speed.toFixed(2)}`);
+        const result = await native.synthesizeToFile(clean, 0, speed);
+        wavPath = result.path;
+        synthMs = result.synthMs;
+        durationMs = result.durationMs;
+        await trace('speak.wav', `${result.path.split('/').pop()} ${Math.round(result.durationMs)}ms (synth=${Math.round(result.synthMs)}ms)`);
+      }
     } else {
       // Stale pre-buffer (different text)? Drop it before synthesizing fresh.
       if (preBuffered) await dropPreBuffer('miss');

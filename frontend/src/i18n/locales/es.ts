@@ -133,9 +133,6 @@ export const es: TranslationDict = {
   'settings.tts.status.error.prefix': 'Error de inicialización',
   'settings.tts.status.error.desc': 'Pulsa "Verificar" abajo para diagnosticar. La voz del sistema NO se utilizará.',
 
-  'settings.nnapi.label': 'Acelerador IA (NNAPI)',
-  'settings.nnapi.desc': 'Usa el chip neuronal del teléfono para acelerar la síntesis. Experimental — desactívalo si hay glitches de audio o si el motor no arranca.',
-
   'error.bookNotFound': 'Libro no encontrado',
   'error.contentMissing': 'Contenido del libro faltante',
   'error.empty': 'El documento está vacío tras la limpieza',

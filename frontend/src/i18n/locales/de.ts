@@ -133,9 +133,6 @@ export const de: TranslationDict = {
   'settings.tts.status.error.prefix': 'Initialisierungsfehler',
   'settings.tts.status.error.desc': 'Tippe unten auf "Prüfen" zur Diagnose. Die System-Stimme wird NICHT verwendet.',
 
-  'settings.nnapi.label': 'KI-Beschleuniger (NNAPI)',
-  'settings.nnapi.desc': 'Nutzt den Neural-Chip des Geräts, um die Synthese zu beschleunigen. Experimentell — bei Audio-Aussetzern oder Engine-Fehler deaktivieren.',
-
   'error.bookNotFound': 'Buch nicht gefunden',
   'error.contentMissing': 'Buchinhalt fehlt',
   'error.empty': 'Dokument ist nach der Bereinigung leer',

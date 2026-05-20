@@ -143,10 +143,6 @@ export const it = {
   'settings.tts.status.error.prefix': 'Errore inizializzazione',
   'settings.tts.status.error.desc': 'Tocca "Verifica" qui sotto per diagnosticare. La voce di sistema NON verrà utilizzata.',
 
-  // NNAPI execution provider
-  'settings.nnapi.label': 'Acceleratore AI (NNAPI)',
-  'settings.nnapi.desc': 'Sfrutta il chip neurale del telefono per velocizzare la sintesi. Sperimentale — se l\'audio gracchia o il motore non parte, disattiva.',
-
   // Errors
   'error.bookNotFound': 'Libro non trovato',
   'error.contentMissing': 'Contenuto libro mancante',
