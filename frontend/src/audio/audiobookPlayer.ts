@@ -162,6 +162,13 @@ export async function playWav(wavPath: string, meta: SentenceMetadata): Promise<
   const p = createAudioPlayer({ uri });
   attachListenersTo(p);
 
+  // v2.4: explicit MediaSession handoff. On strict Android implementations
+  // the OS may briefly show "no audio session" if two players try to claim
+  // the lockscreen at the same instant. We release the previous first.
+  if (previous) {
+    try { previous.setActiveForLockScreen(false); } catch { /* ignore */ }
+  }
+
   // Transfer the MediaSession ownership BEFORE we kill the old player.
   try {
     const lockMeta: { title: string; artist: string; albumTitle?: string; artworkUrl?: string } = {
