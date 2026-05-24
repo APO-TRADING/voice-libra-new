@@ -93,13 +93,13 @@ class TextCleaner:
 
     def _add_paragraph_break(self, text: str) -> str:
         text = re.sub(r'\n{3,}', '\n\n', text)
+        # v2.6 (per user spec): break paragraphs ONLY on `.`, `!`, `?`.
+        # `…` (U+2026) and any other punctuation are NOT treated as sentence
+        # boundaries — they preserve prosody by keeping the surrounding
+        # words on the same line.
         text = re.sub(
             r'([.!?])([»”"]?)\s+([A-ZÀ-ÈÌÒÙ])',
             r'\1\2\n\n\3', text
-        )
-        text = re.sub(
-            r'\.{3}([»”"]?)\s+([A-ZÀ-ÈÌÒÙ])',
-            r'...\1\n\n\2', text
         )
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text
@@ -169,9 +169,13 @@ class TextCleaner:
         return re.sub(r'\n{3,}', '\n\n', text)
 
 
-# Sentence splitter compatible with the cleaner output (Italian-aware)
+# Sentence splitter compatible with the cleaner output (Italian-aware).
+# v2.6 (per user spec): split ONLY on `.`, `!`, `?` — never on `…` (U+2026)
+# or `;` or `:`. Preserving these mid-clause keeps the prosody natural and
+# avoids "robotic chopping" the user reported. Any closing quote / bracket
+# that follows the terminator is glued to it so quoted speech stays whole.
 SENTENCE_RE = re.compile(
-    r'[^.!?…]+(?:[.!?…]+["»”\')\]]*|$)',
+    r'[^.!?]+(?:[.!?]+["»”\')\]]*|$)',
     re.DOTALL
 )
 

@@ -50,8 +50,9 @@ function specials(t: string): string {
 
 function addParagraphBreaks(t: string): string {
   t = t.replace(/\n{3,}/g, '\n\n');
+  // v2.6 (per user spec): break paragraphs ONLY on `.`, `!`, `?`.
+  // `…` (U+2026) and any other punctuation are NOT sentence boundaries.
   t = t.replace(/([.!?])([»”"]?)\s+([A-ZÀ-ÈÌÒÙ])/g, '$1$2\n\n$3');
-  t = t.replace(/\.{3}([»”"]?)\s+([A-ZÀ-ÈÌÒÙ])/g, '...$1\n\n$2');
   t = t.replace(/\n{3,}/g, '\n\n');
   return t;
 }
@@ -108,9 +109,11 @@ export function cleanText(input: string): string {
 
 // Italian-aware sentence splitter.
 //
-// Splits ONLY at strong terminators (. ! ? …) — never at semicolons, colons,
-// or commas. Protects common Italian abbreviations and inline numerics so a
-// '.' inside "Sig. Mario", "3.14", or "1.000.000" does NOT split the sentence.
+// v2.6 (per user spec): splits ONLY at strong terminators `.`, `!`, `?`.
+// Never at `…` (U+2026), `;`, `:`, or commas — keeping these mid-clause
+// preserves natural prosody and avoids the "robotic chopping" effect
+// the user reported. Italian abbreviations and inline numerics with a
+// `.` are still protected so we don't split on them.
 //
 // Algorithm:
 //   1. Replace '.' with a non-breaking placeholder inside protected patterns:
@@ -164,7 +167,10 @@ function unmask(text: string): string {
 export function splitSentences(text: string): string[] {
   const masked = maskProtected(text);
   const out: string[] = [];
-  const re = /[^.!?…]+(?:[.!?…]+["»”')\]]*|$)/g;
+  // v2.6 (per user spec): split ONLY on `.`, `!`, `?` — never on `…`,
+  // `;`, `:`, or any other punctuation. Closing quotes/brackets stay
+  // glued to the terminator so quoted speech keeps its punctuation.
+  const re = /[^.!?]+(?:[.!?]+["»”')\]]*|$)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(masked)) !== null) {
     const s = unmask(m[0]).trim();

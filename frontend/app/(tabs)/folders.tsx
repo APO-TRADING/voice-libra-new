@@ -1,5 +1,5 @@
 import { router, useFocusEffect } from 'expo-router';
-import { ChevronRight, Folder as FolderIcon, FolderPlus, Pencil, Trash2 } from 'lucide-react-native';
+import { ChevronRight, Folder as FolderIcon, FolderPlus, MoreVertical } from 'lucide-react-native';
 import { useCallback, useState } from 'react';
 import {
   Alert,
@@ -77,6 +77,29 @@ export default function FoldersScreen() {
     ]);
   };
 
+  // v2.6 (cosmetic): wrap rename + delete behind a single 3-dot menu so the
+  // folder name has the full row width on a single line. Previously two
+  // inline icon buttons (Pencil + Trash2) were eating ~80px of horizontal
+  // space and truncating long folder names.
+  const openMenu = (f: Folder) => {
+    Alert.alert(f.name, undefined, [
+      {
+        text: t('folders.rename'),
+        onPress: () => {
+          setEditing(f);
+          setName(f.name);
+          setCreating(true);
+        },
+      },
+      {
+        text: t('common.delete'),
+        style: 'destructive',
+        onPress: () => remove(f),
+      },
+      { text: t('common.cancel'), style: 'cancel' },
+    ]);
+  };
+
   return (
     <View style={[styles.c, { backgroundColor: colors.background, paddingTop: insets.top + 8 }]} testID="folders-screen">
       <View style={styles.header}>
@@ -129,31 +152,27 @@ export default function FoldersScreen() {
             <View style={[styles.iconCircle, { backgroundColor: colors.surface2 }]}>
               <FolderIcon color={colors.primaryActive} size={20} />
             </View>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.rowTitle, { color: colors.textPrimary }]}>{item.name}</Text>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text
+                numberOfLines={1}
+                ellipsizeMode="tail"
+                style={[styles.rowTitle, { color: colors.textPrimary }]}
+              >
+                {item.name}
+              </Text>
               <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>{countLabel(counts[item.id] || 0)}</Text>
             </View>
+            {/* v2.6: single 3-dot menu replaces inline Pencil + Trash2 icons */}
             <TouchableOpacity
-              testID={`folder-edit-${item.id}`}
+              testID={`folder-menu-${item.id}`}
               onPress={(e) => {
                 e.stopPropagation();
-                setEditing(item);
-                setName(item.name);
-                setCreating(true);
+                openMenu(item);
               }}
               style={[styles.smallBtn, { borderColor: colors.border }]}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
-              <Pencil color={colors.textSecondary} size={16} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              testID={`folder-delete-${item.id}`}
-              onPress={(e) => {
-                e.stopPropagation();
-                remove(item);
-              }}
-              style={[styles.smallBtn, { borderColor: colors.border }]}
-            >
-              <Trash2 color={colors.danger} size={16} />
+              <MoreVertical color={colors.textSecondary} size={18} />
             </TouchableOpacity>
             <ChevronRight color={colors.textSecondary} size={18} />
           </TouchableOpacity>
