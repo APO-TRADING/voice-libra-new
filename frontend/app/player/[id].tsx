@@ -58,6 +58,12 @@ export default function Player() {
 
   useEffect(() => {
     let mounted = true;
+    // v2.7 (audit cleanup): reset the per-sentence Y-offset cache when the
+    // book changes. Otherwise sentenceLayouts accumulates entries across
+    // every book the user has opened in the current session — a small but
+    // unbounded ref. Clearing it on book switch keeps the working set tied
+    // to the current window only.
+    sentenceLayouts.current = {};
     (async () => {
       if (!id) return;
       try {
