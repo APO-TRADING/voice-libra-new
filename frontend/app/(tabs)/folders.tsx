@@ -15,6 +15,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, BookSummary, Folder } from '../../src/api/client';
+import MarqueeText from '../../src/components/MarqueeText';
 import { useTheme } from '../../src/contexts/ThemeContext';
 import { useT } from '../../src/i18n';
 
@@ -153,13 +154,11 @@ export default function FoldersScreen() {
               <FolderIcon color={colors.primaryActive} size={20} />
             </View>
             <View style={{ flex: 1, minWidth: 0 }}>
-              <Text
-                numberOfLines={1}
-                ellipsizeMode="tail"
-                style={[styles.rowTitle, { color: colors.textPrimary }]}
-              >
+              {/* v2.7: long folder names auto-scroll horizontally (marquee).
+                  Short names render as a plain Text — zero overhead. */}
+              <MarqueeText style={[styles.rowTitle, { color: colors.textPrimary }]}>
                 {item.name}
-              </Text>
+              </MarqueeText>
               <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>{countLabel(counts[item.id] || 0)}</Text>
             </View>
             {/* v2.6: single 3-dot menu replaces inline Pencil + Trash2 icons */}
