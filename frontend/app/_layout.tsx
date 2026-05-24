@@ -17,6 +17,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 // any other screen mounts. This way the persistent trace captures every
 // app launch even if the user never reaches Settings.
 import { tracePiper } from '../src/audio/piperEngine';
+import { migrateSentencesIfNeeded } from '../src/storage/library';
 import { ThemeProvider, useTheme } from '../src/contexts/ThemeContext';
 import { PlayerProvider } from '../src/contexts/PlayerContext';
 import { I18nProvider, useT } from '../src/i18n';
@@ -49,6 +50,25 @@ function StackInner() {
 export default function RootLayout() {
   useEffect(() => {
     tracePiper('app.rootMounted', 'GestureHandlerRoot + SafeArea ready');
+    // v2.6 — one-shot migration after app update.
+    // Re-splits all existing books with the new `.` `!` `?` only logic.
+    // Runs in background (non-blocking) — UI stays responsive. If the
+    // user opens a book before the migration finishes, getBook() reads
+    // the OLD sentences.txt; on the next app launch the version key is
+    // already stamped so no rework happens. Worst case: that one book
+    // has the old splits for one session.
+    migrateSentencesIfNeeded()
+      .then((r) => {
+        if (r.ranMigration) {
+          tracePiper(
+            'app.sentencesMigration',
+            `total=${r.totalBooks} rewritten=${r.rewritten} skipped=${r.skipped} errors=${r.errors} ${r.durationMs}ms`,
+          );
+        }
+      })
+      .catch((e) => {
+        tracePiper('app.sentencesMigration.err', `${e?.message || e}`);
+      });
   }, []);
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
