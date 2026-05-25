@@ -1,44 +1,63 @@
 /**
  * MarqueeText — single-line text that auto-scrolls horizontally when it
- * overflows its parent's width. Spotify-style ticker animation:
- *   start pause → slide to reveal the end → end pause → snap-back → repeat.
+ * overflows its parent's width.
  *
- * v2.7.3 architecture (after measuring bug fixes):
- *   <View width=100%, overflow=hidden, onLayout=measureContainer>
- *     <Text style=measurer absolute, opacity=0, onLayout=measureText/>
- *     <Animated.View style={[width: textWidth, flexDirection: row, translate]}>
- *       <Text numberOfLines=1 ellipsizeMode=clip>{children}</Text>
- *     </Animated.View>
- *   </View>
+ * v2.7.6 architecture (Android-aware fix after EAS-build report):
+ *   The previous attempt (v2.7.5) put the measurer inside a 9999-wide
+ *   absolute wrapper and trusted React Native not to truncate. On real
+ *   Android hardware, however, the measurer <Text> was STILL reporting
+ *   a width close to the visible row width (≈ 200-260 px) instead of
+ *   the true natural width (≈ 380-450 px), so the marquee logic kept
+ *   concluding "fits, skip animation" even for clearly overflowing
+ *   folder names.
  *
- * Why this layout works:
- *  - The OUTER <View> inherits its width from the parent flex layout (e.g.
- *    inside a FlatList row with siblings). `overflow:'hidden'` clips
- *    whatever sticks out the right edge.
- *  - The MEASURER <Text> is absolutely positioned so it's OUT of the flex
- *    flow — RN gives it effectively-infinite horizontal space, so its
- *    `onLayout` reports the TRUE rendered width of the content (the
- *    previous v2.7 version put the measuring Text inside an in-flow
- *    Animated.View, which inherited the parent's width constraint and
- *    therefore reported the post-truncation width — useless for the
- *    overflow check).
- *  - The VISIBLE <Animated.View> has an explicit `width: textWidth` so
- *    the inner Text has exactly the natural-width box it needs — no
- *    truncation, no wrap.
- *  - When textWidth ≤ containerWidth (short content), the Animated.View
- *    is narrower than the parent → no overflow, no animation needed.
- *  - When textWidth > containerWidth (long content), the Animated.View
- *    overflows; the outer View clips and the translateX animation slides
- *    the content left so the user can read the tail.
+ *   Root causes found:
+ *     1) The measurer <Text> did not explicitly nullify
+ *        `numberOfLines` / `ellipsizeMode`. Even when the parent
+ *        component doesn't pass these props, certain release builds /
+ *        Android Text drawables apply a default 1-line truncation when
+ *        a parent layout reports a constrained width DURING the same
+ *        layout pass that the absolute wrapper is being placed in.
+ *        Defensive explicit `numberOfLines={undefined}
+ *        ellipsizeMode={undefined}` (AFTER {...rest}) closes that door.
  *
- * Performance:
- *  - Reanimated v4 runs the translateX interpolation on the UI thread.
- *  - The measurer Text renders ONCE per content change. After that it
- *    re-measures only if the device font size / locale changes (RN
- *    re-fires onLayout in those cases).
- *  - The component returns a plain in-flow <Text> when textWidth has
- *    NOT YET been measured (first render), so the row keeps its proper
- *    height while the off-flow measurer settles.
+ *     2) The 9999-wide measurer wrapper was a `flexDirection:'column'
+ *        alignItems:'stretch'` View, which means the child Text was
+ *        being stretched to 9999 wide. On Android the TextView
+ *        sometimes resolves its `onLayout` width from the laid-out
+ *        view rather than the content. Adding
+ *        `flexDirection:'row' alignItems:'flex-start'` to the wrapper
+ *        and `alignSelf:'flex-start'` to the Text shrink-wraps it to
+ *        its content so `onLayout` reports the *content* width.
+ *
+ *     3) Parents (e.g. folder rows) didn't always give the Marquee a
+ *        clean `overflow:'hidden'` boundary, so the flex sibling could
+ *        widen past its container for a tick, making the Marquee
+ *        conclude "fits". Now folder rows wrap the Marquee in a
+ *        `{ flex:1, minWidth:0, overflow:'hidden' }` View so the
+ *        container width is always the real visible width.
+ *
+ *   Final layout pattern:
+ *     <View width=100%, overflow=hidden, onLayout=measureContainer>
+ *       <View pointerEvents=none, position=absolute, width=9999,
+ *             flexDirection=row, alignItems=flex-start, opacity=0>
+ *         <Text alignSelf=flex-start, numberOfLines=undefined,
+ *               ellipsizeMode=undefined, onLayout=measureText>
+ *           {children}                                  ← measurer
+ *         </Text>
+ *       </View>
+ *
+ *       {when ready & overflows:}
+ *         <Animated.View width=textWidth, flexDirection=row>
+ *           <Text numberOfLines=undefined, ellipsizeMode=undefined>
+ *             {children}                                ← marquee
+ *           </Text>
+ *         </Animated.View>
+ *       {when ready & fits:}
+ *         <Text numberOfLines=1, ellipsizeMode=tail>... ← static
+ *       {while measuring:}
+ *         <Text numberOfLines=1, ellipsizeMode=tail>... ← placeholder
+ *     </View>
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { LayoutChangeEvent, StyleProp, StyleSheet, Text, TextProps, TextStyle, View } from 'react-native';
@@ -63,6 +82,7 @@ type Props = TextProps & {
 
 const DEFAULT_SPEED_PX_PER_SEC = 40;
 const DEFAULT_PAUSE_MS = 1200;
+const MEASURER_WIDTH = 9999;
 
 export function MarqueeText({
   children,
@@ -81,15 +101,12 @@ export function MarqueeText({
     if (Math.abs(w - containerWidth) > 0.5) setContainerWidth(w);
   };
 
-  // The measurer <Text> lives in absolute-position land (no width constraint
-  // from the parent), so onLayout reports the TRUE rendered width.
   const onMeasureLayout = (e: LayoutChangeEvent) => {
     const w = e.nativeEvent.layout.width;
     if (Math.abs(w - textWidth) > 0.5) setTextWidth(w);
   };
 
-  // Reset when content changes so the new text re-measures and the
-  // animation restarts from a clean state.
+  // Reset when the content changes so the new text re-measures fresh.
   useEffect(() => {
     if (lastChildrenRef.current !== children) {
       lastChildrenRef.current = children;
@@ -107,7 +124,9 @@ export function MarqueeText({
       return;
     }
     const slideMs = Math.max(800, Math.round((overflowPx / speed) * 1000));
-    const endX = -(overflowPx + 4);
+    // 8 px end-margin so the trailing glyph doesn't sit flush against the
+    // clipped edge during the end-pause.
+    const endX = -(overflowPx + 8);
     translateX.value = 0;
     translateX.value = withRepeat(
       withSequence(
@@ -131,37 +150,52 @@ export function MarqueeText({
 
   return (
     <View onLayout={onContainerLayout} style={styles.container}>
-      {/* MEASURER — out of flow, opacity 0. Always present so we re-measure
-          when the font/locale/dimensions change. The inline `style.width`
-          override is critical: position:'absolute' alone isn't enough on
-          some RN versions to fully escape the flex parent's intrinsic
-          width hint. We pin top/left and let width grow with the content. */}
-      <Text
-        {...rest}
-        style={[style, styles.measurer]}
-        onLayout={onMeasureLayout}
-      >
-        {children}
-      </Text>
+      {/* MEASURER — out of flow, in a 9999-px-wide wrapper so the inner
+          <Text> sees no truncation constraint and its onLayout reports
+          the true natural width.
+          v2.7.6: CRITICAL on Android — we explicitly null out
+          `numberOfLines` and `ellipsizeMode` AFTER {...rest} so that
+          any parent-passed prop or platform default cannot silently
+          truncate the measurer string and report a too-small width
+          (which is the symptom the user observed in the EAS build:
+          marquee never triggered because measurer == container width).
+          alignSelf:'flex-start' lets the Text size to its content
+          width even though the wrapper is 9999 wide. */}
+      <View pointerEvents="none" style={styles.measurerWrap}>
+        <Text
+          {...rest}
+          style={[style, styles.measurerText]}
+          onLayout={onMeasureLayout}
+          numberOfLines={undefined}
+          ellipsizeMode={undefined}
+          allowFontScaling={false}
+        >
+          {children}
+        </Text>
+      </View>
 
-      {/* DISPLAY — until we have a measurement, render a plain in-flow Text
-          so the parent FlatList row gets its proper height. After
-          measurement, switch to either a static Text (fits) or the
-          marquee Animated.View (overflows). */}
+      {/* DISPLAY — three states: pre-measurement (placeholder height),
+          measured-and-fits (static text), measured-and-overflows (marquee). */}
       {!ready ? (
-        // First render: in-flow Text gives the row its height.
         <Text {...rest} numberOfLines={1} ellipsizeMode="tail" style={style}>
           {children}
         </Text>
       ) : !overflows ? (
-        // Static — fits.
         <Text {...rest} numberOfLines={1} ellipsizeMode="tail" style={style}>
           {children}
         </Text>
       ) : (
-        // Marquee — overflows.
         <Animated.View style={[{ width: textWidth, flexDirection: 'row' }, animatedStyle]}>
-          <Text {...rest} numberOfLines={1} ellipsizeMode="clip" style={style}>
+          {/* v2.7.6: ditto here — the Animated.View has exact textWidth,
+              so we must NOT cap to numberOfLines=1 (Android would still
+              measure ellipsis layout passes that visually clip glyphs). */}
+          <Text
+            {...rest}
+            numberOfLines={undefined}
+            ellipsizeMode={undefined}
+            style={style}
+            allowFontScaling={false}
+          >
             {children}
           </Text>
         </Animated.View>
@@ -171,19 +205,27 @@ export function MarqueeText({
 }
 
 const styles = StyleSheet.create({
-  // overflow:'hidden' clips the marquee when its content sticks past the
-  // parent column's right edge (where the 3-dot menu and chevron live).
+  // Outer row container — width comes from the parent flex layout, the
+  // overflow:hidden clips the marquee animation past the right edge.
   container: { width: '100%', overflow: 'hidden' },
-  // The measurer sits at the same baseline as the visible row but contributes
-  // nothing to the layout (opacity 0, absolute position, no clipping width).
-  measurer: {
+  // Measurer wrapper — explicit 9999 width is what gives the inner <Text>
+  // unbounded horizontal room so it renders at its natural size and
+  // onLayout reports the real number.
+  // v2.7.6: alignItems:'flex-start' on Android stops the wrapper from
+  // stretching the Text to fill the 9999-wide row; combined with
+  // alignSelf:'flex-start' on the Text itself, this guarantees that
+  // onLayout reports the *content* width and not the wrapper width.
+  measurerWrap: {
     position: 'absolute',
     top: 0,
     left: 0,
+    width: MEASURER_WIDTH,
     opacity: 0,
-    // pointerEvents:'none' — the measurer should never intercept taps.
-    // (We can't apply it on Text directly; the absolute positioning is
-    // enough to keep it out of the way for hit-testing in this context.)
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+  },
+  measurerText: {
+    alignSelf: 'flex-start',
   },
 });
 

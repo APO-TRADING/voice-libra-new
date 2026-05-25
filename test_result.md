@@ -962,3 +962,99 @@ agent_communication:
         `withNativePhonemizer=true` gradle property). Will enable full
         multi-language support (EN, ES, DE, FR, ...). Italian works
         right now thanks to ItalianPhonemizer fallback.
+
+
+## frontend:
+  - task: "MarqueeText scroll fix v2.7.6 — Android measurer truncation"
+    implemented: true
+    working: "NA"  # awaiting EAS build verification by user
+    file: "/app/frontend/src/components/MarqueeText.tsx, /app/frontend/app/(tabs)/folders.tsx"
+    stuck_count: 2
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "user"
+          comment: |
+            User report from real EAS build (Android, post v2.7.5): Marquee
+            still does not scroll for long folder names. Marquee code is
+            present but the text is truncated with ellipsis on the same row.
+            User diagnosis: the inner <Text> of the measurer is inheriting
+            (or defaulting to on Android) `numberOfLines={1}` /
+            `ellipsizeMode="tail"`, so onLayout reports a width close to the
+            visible row width instead of the natural content width — the
+            "overflows" check then returns false and the animation never
+            kicks in.
+            Requested layout-level safeguard: wrap the Marquee in
+            `<View style={{ flex:1, overflow:'hidden', marginRight:12 }}>`
+            so the boundary is unambiguous and doesn't collide with the
+            3-dot menu icon.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            v2.7.6 — Applied user-suggested two-pronged fix:
+
+            1) MarqueeText.tsx (measurer + marquee branches):
+               - Both <Text> nodes now explicitly set
+                 `numberOfLines={undefined}` AND `ellipsizeMode={undefined}`
+                 AFTER `{...rest}`. This forcibly closes the door on any
+                 default truncation Android may apply, and on any prop a
+                 future caller might pass via `...rest`.
+               - Added `allowFontScaling={false}` on both so dynamic font
+                 scaling can't change the measured width post-layout.
+               - measurerWrap style now has `flexDirection:'row'` and
+                 `alignItems:'flex-start'`; the measurer <Text> has
+                 `alignSelf:'flex-start'` (via styles.measurerText). Combined,
+                 this shrink-wraps the Text inside the 9999-wide wrapper so
+                 onLayout reports the *content* width, never the wrapper
+                 width.
+
+            2) folders.tsx (folder row layout):
+               - Wrapping <View> around <MarqueeText/> + meta count now has
+                 `{ flex:1, minWidth:0, overflow:'hidden' }` — the explicit
+                 `overflow:'hidden'` gives the Marquee a clean container
+                 boundary that the row's `gap:12` separates cleanly from
+                 the 3-dot menu icon.
+               - Bonus: the meta count Text now uses
+                 `numberOfLines={1} ellipsizeMode="tail"` so it doesn't
+                 push the row height on edge cases.
+
+            Build state: TypeScript noEmit returns 0 errors. Metro re-bundled
+            successfully (visible in expo.out.log).
+
+            VERIFICATION REQUIRED: User must rebuild via
+            `cd /app/frontend && eas build --platform android --profile preview`
+            and confirm long folder names auto-scroll on real device.
+            (Web preview can not be relied on for this specific Android
+            measurement quirk.)
+
+## metadata:
+  created_by: "main_agent"
+  version: "2.7.6"
+  test_sequence: 0
+  run_ui: false
+
+## test_plan:
+  current_focus:
+    - "MarqueeText scroll fix v2.7.6 — Android measurer truncation"
+  stuck_tasks:
+    - "MarqueeText scroll fix v2.7.6 — Android measurer truncation"
+  test_all: false
+  test_priority: "high_first"
+
+## agent_communication:
+    - agent: "main"
+      message: |
+        Applied the user's surgical fix for the marquee truncation bug
+        in v2.7.6 (see frontend tasks above). The change is purely
+        layout/Text-prop level — no migration version bump or data
+        change is required for this fix. The data migration
+        (`@beppe.sentencesSplitVersion` at 2.7.2) from the previous
+        session remains in place for the splitter fix and will run
+        automatically on first launch of the new build.
+
+        User should now run a fresh EAS build and confirm:
+          (a) Long folder names auto-scroll left/right with the pause
+              at each end.
+          (b) Existing books get re-chunked correctly on first launch
+              after install (auto-migration logs in console).

@@ -153,13 +153,20 @@ export default function FoldersScreen() {
             <View style={[styles.iconCircle, { backgroundColor: colors.surface2 }]}>
               <FolderIcon color={colors.primaryActive} size={20} />
             </View>
-            <View style={{ flex: 1, minWidth: 0 }}>
+            <View style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
               {/* v2.7: long folder names auto-scroll horizontally (marquee).
-                  Short names render as a plain Text — zero overhead. */}
+                  Short names render as a plain Text — zero overhead.
+                  v2.7.6: overflow:'hidden' on this wrapper gives the
+                  Marquee a CLEAR horizontal boundary so its measurer can
+                  detect overflow and trigger the slide. Without it the
+                  flex child can momentarily widen past its parent on
+                  Android causing the marquee logic to think the text
+                  fits and skip the animation. The row's gap:12 takes
+                  care of the spacing toward the 3-dot menu. */}
               <MarqueeText style={[styles.rowTitle, { color: colors.textPrimary }]}>
                 {item.name}
               </MarqueeText>
-              <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>{countLabel(counts[item.id] || 0)}</Text>
+              <Text style={[styles.rowMeta, { color: colors.textSecondary }]} numberOfLines={1} ellipsizeMode="tail">{countLabel(counts[item.id] || 0)}</Text>
             </View>
             {/* v2.6: single 3-dot menu replaces inline Pencil + Trash2 icons */}
             <TouchableOpacity
