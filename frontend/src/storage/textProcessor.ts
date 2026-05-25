@@ -173,7 +173,16 @@ export function splitSentences(text: string): string[] {
   const re = /[^.!?]+(?:[.!?]+["»”')\]]*|$)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(masked)) !== null) {
-    const s = unmask(m[0]).trim();
+    // v2.7.2 (per user spec): collapse ANY internal whitespace (newlines,
+    // tabs, multiple spaces) to a single space. The splitter regex
+    // `[^.!?]+` happily matches newlines as part of a sentence body, so
+    // a sentence like "Mentre svoltava in Monkgate, diretto verso\nil
+    // centro, sbirciò..." emerges as ONE chunk — good. But when we
+    // later persist the sentences array to disk with `.join('\n')`,
+    // the embedded newline becomes a fake row separator and the next
+    // read() splits the sentence in half. Collapsing here is the
+    // single point of truth that makes the whole pipeline robust.
+    const s = unmask(m[0]).replace(/\s+/g, ' ').trim();
     if (s) out.push(s);
   }
   return out;

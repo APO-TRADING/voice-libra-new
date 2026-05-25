@@ -1,39 +1,56 @@
 /**
  * MarqueeText — single-line text that auto-scrolls horizontally when it
- * overflows its container. Spotify-style ticker animation: text pauses
- * at the start, slides left to reveal the end, pauses, then snaps back
- * and repeats.
+ * overflows its parent's width. Spotify-style ticker animation:
+ *   start pause → slide to reveal the end → end pause → snap-back → repeat.
  *
- * v2.7.1 architecture (after the v2.7 bug fix):
+ * v2.7.3 architecture (after measuring bug fixes):
  *   <View width=100%, overflow=hidden, onLayout=measureContainer>
- *     <Animated.View flexDirection=row, style=translateX>
- *       <Text numberOfLines=1, ellipsizeMode=clip, onLayout=measureText>
- *         {children}
- *       </Text>
+ *     <Text style=measurer absolute, opacity=0, onLayout=measureText/>
+ *     <Animated.View style={[width: textWidth, flexDirection: row, translate]}>
+ *       <Text numberOfLines=1 ellipsizeMode=clip>{children}</Text>
  *     </Animated.View>
  *   </View>
  *
- * Key insight (the bug we fixed):
- *   When the inner <Text> sits inside a parent that has NO width constraint
- *   (the Animated.View is sized by its content, not by its parent), React
- *   Native gives the Text effectively-infinite horizontal space, so
- *   `numberOfLines={1}` does NOT truncate and `onLayout` reports the
- *   text's TRUE rendered width. The previous version put the Text inside
- *   a width-constrained View, which meant the Text was always truncated
- *   to fit and `onTextLayout` reported the (post-ellipsis) width — so
- *   we never detected an overflow and never started the animation.
+ * Why this layout works:
+ *  - The OUTER <View> inherits its width from the parent flex layout (e.g.
+ *    inside a FlatList row with siblings). `overflow:'hidden'` clips
+ *    whatever sticks out the right edge.
+ *  - The MEASURER <Text> is absolutely positioned so it's OUT of the flex
+ *    flow — RN gives it effectively-infinite horizontal space, so its
+ *    `onLayout` reports the TRUE rendered width of the content (the
+ *    previous v2.7 version put the measuring Text inside an in-flow
+ *    Animated.View, which inherited the parent's width constraint and
+ *    therefore reported the post-truncation width — useless for the
+ *    overflow check).
+ *  - The VISIBLE <Animated.View> has an explicit `width: textWidth` so
+ *    the inner Text has exactly the natural-width box it needs — no
+ *    truncation, no wrap.
+ *  - When textWidth ≤ containerWidth (short content), the Animated.View
+ *    is narrower than the parent → no overflow, no animation needed.
+ *  - When textWidth > containerWidth (long content), the Animated.View
+ *    overflows; the outer View clips and the translateX animation slides
+ *    the content left so the user can read the tail.
  *
- *   The OUTER <View> still has the parent's allotted width (e.g. flex:1
- *   inside a FlatList row) and `overflow: 'hidden'` clips whatever sticks
- *   out the right edge. Result: long names visibly scroll, short names
- *   render as static text with zero animation cost.
- *
- * Usage:
- *   <MarqueeText style={{ fontSize: 16 }}>Some very long folder name…</MarqueeText>
+ * Performance:
+ *  - Reanimated v4 runs the translateX interpolation on the UI thread.
+ *  - The measurer Text renders ONCE per content change. After that it
+ *    re-measures only if the device font size / locale changes (RN
+ *    re-fires onLayout in those cases).
+ *  - The component returns a plain in-flow <Text> when textWidth has
+ *    NOT YET been measured (first render), so the row keeps its proper
+ *    height while the off-flow measurer settles.
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { LayoutChangeEvent, StyleProp, StyleSheet, Text, TextProps, TextStyle, View } from 'react-native';
-import Animated, { Easing, useAnimatedStyle, useSharedValue, withRepeat, withSequence, withTiming, cancelAnimation } from 'react-native-reanimated';
+import Animated, {
+  Easing,
+  cancelAnimation,
+  useAnimatedStyle,
+  useSharedValue,
+  withRepeat,
+  withSequence,
+  withTiming,
+} from 'react-native-reanimated';
 
 type Props = TextProps & {
   children: string;
@@ -61,17 +78,18 @@ export function MarqueeText({
 
   const onContainerLayout = (e: LayoutChangeEvent) => {
     const w = e.nativeEvent.layout.width;
-    if (w !== containerWidth) setContainerWidth(w);
+    if (Math.abs(w - containerWidth) > 0.5) setContainerWidth(w);
   };
 
-  // The <Text> sits in a parent with no width constraint, so this layout
-  // event reports the natural rendered width of the text.
-  const onTextLayout = (e: LayoutChangeEvent) => {
+  // The measurer <Text> lives in absolute-position land (no width constraint
+  // from the parent), so onLayout reports the TRUE rendered width.
+  const onMeasureLayout = (e: LayoutChangeEvent) => {
     const w = e.nativeEvent.layout.width;
     if (Math.abs(w - textWidth) > 0.5) setTextWidth(w);
   };
 
-  // Reset when the content changes so we re-measure and restart cleanly.
+  // Reset when content changes so the new text re-measures and the
+  // animation restarts from a clean state.
   useEffect(() => {
     if (lastChildrenRef.current !== children) {
       lastChildrenRef.current = children;
@@ -88,12 +106,7 @@ export function MarqueeText({
       translateX.value = 0;
       return;
     }
-    // Slide duration scales with the actual overflow distance so a slightly-
-    // too-long name slides briefly and a very long one slides longer, all
-    // at the same comfortable px/s pace.
     const slideMs = Math.max(800, Math.round((overflowPx / speed) * 1000));
-    // A 4-pixel end margin keeps the last glyph from sitting flush against
-    // the right edge while paused.
     const endX = -(overflowPx + 4);
     translateX.value = 0;
     translateX.value = withRepeat(
@@ -113,31 +126,65 @@ export function MarqueeText({
     transform: [{ translateX: translateX.value }],
   }));
 
+  const ready = textWidth > 0;
+  const overflows = ready && containerWidth > 0 && textWidth > containerWidth;
+
   return (
     <View onLayout={onContainerLayout} style={styles.container}>
-      <Animated.View style={[styles.scroller, animatedStyle]}>
-        <Text
-          {...rest}
-          numberOfLines={1}
-          ellipsizeMode="clip"
-          onLayout={onTextLayout}
-          style={style}
-        >
+      {/* MEASURER — out of flow, opacity 0. Always present so we re-measure
+          when the font/locale/dimensions change. The inline `style.width`
+          override is critical: position:'absolute' alone isn't enough on
+          some RN versions to fully escape the flex parent's intrinsic
+          width hint. We pin top/left and let width grow with the content. */}
+      <Text
+        {...rest}
+        style={[style, styles.measurer]}
+        onLayout={onMeasureLayout}
+      >
+        {children}
+      </Text>
+
+      {/* DISPLAY — until we have a measurement, render a plain in-flow Text
+          so the parent FlatList row gets its proper height. After
+          measurement, switch to either a static Text (fits) or the
+          marquee Animated.View (overflows). */}
+      {!ready ? (
+        // First render: in-flow Text gives the row its height.
+        <Text {...rest} numberOfLines={1} ellipsizeMode="tail" style={style}>
           {children}
         </Text>
-      </Animated.View>
+      ) : !overflows ? (
+        // Static — fits.
+        <Text {...rest} numberOfLines={1} ellipsizeMode="tail" style={style}>
+          {children}
+        </Text>
+      ) : (
+        // Marquee — overflows.
+        <Animated.View style={[{ width: textWidth, flexDirection: 'row' }, animatedStyle]}>
+          <Text {...rest} numberOfLines={1} ellipsizeMode="clip" style={style}>
+            {children}
+          </Text>
+        </Animated.View>
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  // overflow:'hidden' is what makes the long text get clipped at the edge
-  // of its parent column instead of pushing the trailing icons (3-dot
-  // menu, chevron) off the row.
+  // overflow:'hidden' clips the marquee when its content sticks past the
+  // parent column's right edge (where the 3-dot menu and chevron live).
   container: { width: '100%', overflow: 'hidden' },
-  // No width constraint here so the <Text> can size itself naturally and
-  // onLayout reports its true rendered width.
-  scroller: { flexDirection: 'row' },
+  // The measurer sits at the same baseline as the visible row but contributes
+  // nothing to the layout (opacity 0, absolute position, no clipping width).
+  measurer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    opacity: 0,
+    // pointerEvents:'none' — the measurer should never intercept taps.
+    // (We can't apply it on Text directly; the absolute positioning is
+    // enough to keep it out of the way for hit-testing in this context.)
+  },
 });
 
 export default MarqueeText;

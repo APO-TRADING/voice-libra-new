@@ -38,12 +38,12 @@ export type SortMode = 'manual' | 'recent' | 'title' | 'author';
 const K_BOOKS = '@beppe.books.v1';
 const K_FOLDERS = '@beppe.folders.v1';
 const K_SORT_MODE = '@beppe.sortMode.v1';
-// v2.6: bumped to '2.6.0' when we changed the sentence-splitter to ONLY
-// break on `.`, `!`, `?`. Older books were pre-split with the previous
-// regex (which also broke on `…`). On startup we re-split them in-place
-// once and store the new version so we don't repeat the work.
+// v2.7.2 bumped from '2.6.0' — the previous migration left embedded
+// newlines inside sentence bodies (the splitter didn't collapse internal
+// whitespace), so books migrated in v2.6.0 still showed split-in-half
+// sentences in the UI. Bumping the version forces a one-time re-split.
 const K_SENTENCES_SPLIT_VERSION = '@beppe.sentencesSplitVersion';
-const APP_SENTENCES_SPLIT_VERSION = '2.6.0';
+const APP_SENTENCES_SPLIT_VERSION = '2.7.2';
 // Legacy key (pre-FS storage). Kept for one-shot migration on read.
 const K_BOOK_CONTENT_LEGACY = (id: string) => `@beppe.book.${id}`;
 

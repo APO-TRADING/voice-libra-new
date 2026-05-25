@@ -184,7 +184,12 @@ def split_sentences(text: str) -> list[str]:
     """Split cleaned text into sentences for sentence-level navigation."""
     sentences: list[str] = []
     for raw in SENTENCE_RE.findall(text):
-        s = raw.strip()
+        # v2.7.2 (per user spec): collapse ANY internal whitespace
+        # (newlines, tabs, multiple spaces) to a single space. Otherwise
+        # a sentence body that happens to span a hard line break from
+        # the source document keeps the embedded '\n' and breaks the
+        # frontend persistence layer (which joins with '\n').
+        s = re.sub(r'\s+', ' ', raw).strip()
         if s:
             sentences.append(s)
     return sentences
