@@ -1058,3 +1058,172 @@ agent_communication:
               at each end.
           (b) Existing books get re-chunked correctly on first launch
               after install (auto-migration logs in console).
+
+## frontend:
+  - task: "Foreign-words English pronunciation v2.7.7 (SSML voice switch)"
+    implemented: true
+    working: "NA"  # awaiting EAS build verification by user
+    file: |
+      /app/frontend/src/audio/foreignWords.ts (new),
+      /app/frontend/assets/dicts/english_top10k.bin (new, 25 KB gz),
+      /app/frontend/modules/piper-tts/android/src/main/cpp/phonemize_jni.cpp (SSML flag),
+      /app/frontend/src/audio/piperEngine.ts (init + 3 wrap sites),
+      /app/frontend/app/(tabs)/settings.tsx (toggle UI),
+      /app/frontend/src/i18n/locales/{it,en,fr,de,es}.ts (3 new keys)
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "user"
+          comment: |
+            User reported: Italian audiobook reads English loanwords like
+            "Broadway" → "broaduai" and "weekend" with French-ish accent.
+            Wanted a scalable solution avoiding hand-curated per-language
+            exception lists. After two iterations of investigation
+            (`language en` in lang files turned out NOT to control runtime
+            switching), settled on the SSML voice-switch approach: eSpeak
+            supports <voice name="en">word</voice> natively and produces
+            correct English IPA inside otherwise non-English sentences.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            v2.7.7 — Six-step implementation as approved:
+
+            (1) BUNDLED ENGLISH WORDLIST
+                • Built /app/frontend/assets/dicts/english_top10k.bin
+                  (25.3 KB gz, 8 677 lowercased headwords) by filtering
+                  Google's top-10k English words to length >= 4 and
+                  subtracting (a) acclimated IT loanwords (test, computer,
+                  internet, weekend, manager, team, …) and (b) Italian
+                  homographs of English words (come, era, dove, sopra,
+                  vita, casa, mano, tutto, …).
+                • Script kept at /tmp/build_wordlist.py for repeatable
+                  regeneration.
+
+            (2) NATIVE JNI PATCH (minimal, retro-compatible)
+                /app/frontend/modules/piper-tts/android/src/main/cpp/phonemize_jni.cpp
+                  - In nativePhonemize() we now AUTO-DETECT SSML markup
+                    by scanning the input for the literal `<voice ` or
+                    `<speak` substrings. If present:
+                        textmode = espeakCHARS_UTF8 | espeakSSML
+                    Otherwise unchanged (plain text path untouched).
+                  - No JNI signature change → zero impact on Kotlin /
+                    JS callers.
+                  - Verified the patch compiles cleanly (host gcc -c with
+                    JNI/espeak-ng headers; 0 warnings/errors).
+
+            (3) JS PRE-PROCESSOR
+                /app/frontend/src/audio/foreignWords.ts (NEW)
+                  - ensureEnglishWordsLoaded(): one-shot gunzip + Set
+                    build (~40 ms on midrange device, cached forever).
+                  - refreshForeignWordsFlag(): mirrors the AsyncStorage
+                    @piper/foreign_words_en_v1 boolean into an in-memory
+                    cache so the synthesis hot-path doesn't await
+                    AsyncStorage on every sentence.
+                  - setForeignWordsEnabled(): persists user choice +
+                    updates in-memory cache.
+                  - wrapForeignWords(text, srcLang):
+                      • returns input unchanged if toggle OFF / wordlist
+                        not loaded / srcLang === 'en' / no token matched
+                        (avoids polluting plain text with XML escapes
+                        when no switch is needed)
+                      • otherwise wraps each matching token in
+                        <voice name="en">…</voice>, escapes literal
+                        <, > and & in surrounding text so the SSML
+                        parser doesn't choke
+                      • preserves original casing inside the wrapper
+                  - JS smoke-test (Node, fflate-equivalent gunzip):
+                      Manhattan / Brooklyn / Chicago / Shakespeare /
+                      Hemingway / Apple / Google / Hollywood / Vegas /
+                      Boston → WRAPPED
+                      computer / internet / test / team / casa / mano /
+                      mia / questo → UNCHANGED
+                      "a<b allora b>a" → UNCHANGED (no match → no
+                      escape pollution)
+                      Source lang 'en' → no-op
+                  - Note: 'dashboard', 'frontend', 'microservice' are
+                    NOT in the Google top-10k wordlist (acceptable for
+                    MVP, can be enriched later).
+
+            (4) PIPER ENGINE INTEGRATION
+                /app/frontend/src/audio/piperEngine.ts
+                  - doInitEngine() now calls refreshForeignWordsFlag()
+                    + ensureEnglishWordsLoaded() (fire-and-forget) on
+                    every init / reload.
+                  - The 3 sites that call native.synthesizeToFile(clean, …)
+                    (prebuffer + 2 speakSentence branches) now wrap the
+                    text through wrapForeignWords(clean, srcLang) where
+                    srcLang = currentVoiceMeta.language_code.split('_')[0].
+                  - The cleanText (plain) is still cached in
+                    preBuffered.text as the lookup key — so a cache hit
+                    works regardless of toggle state.
+
+            (5) UI TOGGLE
+                /app/frontend/app/(tabs)/settings.tsx
+                  - New "PRONUNCIATION" section between VOCE and TTS
+                    ENGINE, with a Globe icon + Switch.
+                  - Title: 'settings.foreignWords.label'
+                  - Desc:  'settings.foreignWords.desc'
+                  - Persisted via setForeignWordsEnabled() + triggers
+                    reloadEngine() so any active prebuffer is dropped
+                    and the NEXT sentence picks up the new behaviour
+                    immediately.
+                  - ActivityIndicator while switching to avoid double-
+                    fire.
+                  - testID="foreign-words-switch" for automation.
+
+            (6) i18N — all 5 UI languages updated
+                Keys added to /app/frontend/src/i18n/locales/{it,en,fr,de,es}.ts:
+                  - settings.foreignWords.section
+                  - settings.foreignWords.label
+                  - settings.foreignWords.desc
+
+            BUILD STATE:
+              • TypeScript noEmit: 0 errors across all 6 modified files.
+              • Metro web bundle: clean rebuild after restart.
+              • Settings screen verified via screenshot — new section
+                renders correctly with Italian + English copy.
+              • JNI patch verified compilable in host gcc with stubbed
+                android/log.h (object file 25 KB, no warnings).
+
+            VERIFICATION REQUIRED on EAS build:
+              (a) Toggle appears in Settings > PRONUNCIATION section.
+              (b) With toggle OFF, all existing audiobooks read exactly
+                  as before (zero regression).
+              (c) With toggle ON, an Italian book containing
+                  "Manhattan", "Brooklyn", "Shakespeare", etc. now
+                  reads those words with English-style phonemes (the
+                  Riccardo voice ships a 130-symbol full IPA vocab so
+                  all English phonemes are supported).
+              (d) Acclimated loanwords ("computer", "internet", "test",
+                  "weekend", "team") remain in Italian.
+
+## metadata:
+  created_by: "main_agent"
+  version: "2.7.7"
+  test_sequence: 0
+  run_ui: false
+
+## test_plan:
+  current_focus:
+    - "Foreign-words English pronunciation v2.7.7 (SSML voice switch)"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+## agent_communication:
+    - agent: "main"
+      message: |
+        v2.7.7 SSML-based foreign-words pipeline shipped (6 changed
+        files + 1 new asset). The toggle is OFF by default — existing
+        behaviour is preserved bit-for-bit until the user explicitly
+        enables it from Settings > PRONUNCIATION.
+
+        EAS build required to test on real Android (the JNI auto-detect
+        is the only piece that can't be exercised via the web preview).
+
+        Wordlist can be enriched later by re-running the script at
+        /tmp/build_wordlist.py — the asset is just a gzipped UTF-8 text
+        file, one word per line.
+

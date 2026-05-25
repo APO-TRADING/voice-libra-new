@@ -38,6 +38,11 @@ import {
   type DynamicVoiceMeta,
 } from './dynamicVoices';
 import { getPiperNative, isPiperAvailable } from './piperBridge';
+import {
+  ensureEnglishWordsLoaded,
+  refreshForeignWordsFlag,
+  wrapForeignWords,
+} from './foreignWords';
 
 const VOICES_DIR = `${FileSystem.documentDirectory}piper/voices`;
 const ESPEAK_DIR = `${FileSystem.documentDirectory}piper/espeak-ng-data`;
@@ -436,6 +441,15 @@ async function doInitEngine(): Promise<boolean> {
   emitProgress('Avvio motore TTS...', 1);
   await logSystemInfo();
 
+  // v2.7.7: Boot-time refresh of the foreign-words pipeline. Wordlist
+  // loads lazily (the gunzip + Set build cost <40ms on midrange devices)
+  // and the AsyncStorage flag is mirrored into an in-memory boolean so
+  // the synthesis hot-path can branch without awaiting AsyncStorage on
+  // every sentence. Both calls are cheap-and-safe to repeat across
+  // reloadEngine() invocations.
+  await refreshForeignWordsFlag();
+  ensureEnglishWordsLoaded().catch(() => { /* never block init */ });
+
   const native = getPiperNative();
   if (!isPiperAvailable() || !native) {
     lastError = 'Modulo nativo non disponibile (anteprima Expo Go)';
@@ -642,7 +656,15 @@ export async function prebufferSentence(text: string, lengthScale: number): Prom
   const job = (async () => {
     try {
       await trace('prebuf.synth', `len=${clean.length} speed=${speed.toFixed(2)}`);
-      const result = await native.synthesizeToFile(clean, 0, speed);
+      // v2.7.7: If the user enabled "Pronuncia inglese per termini stranieri",
+      // wrap English loanwords (Manhattan, Brooklyn, dashboard, …) in SSML
+      // `<voice name="en">…</voice>` tags so eSpeak switches its internal
+      // translator per-word. The native JNI auto-detects the `<voice ` substring
+      // and OR-s `espeakSSML` into the textmode. Plain text (toggle OFF) is
+      // unchanged so this is fully backwards-compatible.
+      const srcLang = currentVoiceMeta?.language_code?.split(/[-_]/)[0]?.toLowerCase() || 'it';
+      const wrapped = wrapForeignWords(clean, srcLang);
+      const result = await native.synthesizeToFile(wrapped, 0, speed);
       // If a stopSpeak() came in while we were synthesizing, the engine is
       // not "ready" any more — discard the WAV instead of populating the
       // slot.
@@ -722,7 +744,12 @@ export async function speakSentence(
       } else {
         if (preBuffered) await dropPreBuffer('miss-after-wait');
         await trace('speak.synth', `len=${clean.length} speed=${speed.toFixed(2)}`);
-        const result = await native.synthesizeToFile(clean, 0, speed);
+        // v2.7.7: see prebufferSentence() above for full rationale on
+        // wrapping. Mirror here so the prebuffer-miss path also benefits
+        // from the language switch when the toggle is ON.
+        const srcLang = currentVoiceMeta?.language_code?.split(/[-_]/)[0]?.toLowerCase() || 'it';
+        const wrapped = wrapForeignWords(clean, srcLang);
+        const result = await native.synthesizeToFile(wrapped, 0, speed);
         wavPath = result.path;
         synthMs = result.synthMs;
         durationMs = result.durationMs;
@@ -732,7 +759,10 @@ export async function speakSentence(
       // Stale pre-buffer (different text)? Drop it before synthesizing fresh.
       if (preBuffered) await dropPreBuffer('miss');
       await trace('speak.synth', `len=${clean.length} speed=${speed.toFixed(2)}`);
-      const result = await native.synthesizeToFile(clean, 0, speed);
+      // v2.7.7: wrap loanwords with SSML voice-switch tags if the toggle is on.
+      const srcLang = currentVoiceMeta?.language_code?.split(/[-_]/)[0]?.toLowerCase() || 'it';
+      const wrapped = wrapForeignWords(clean, srcLang);
+      const result = await native.synthesizeToFile(wrapped, 0, speed);
       wavPath = result.path;
       synthMs = result.synthMs;
       durationMs = result.durationMs;

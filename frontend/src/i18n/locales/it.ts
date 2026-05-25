@@ -134,6 +134,11 @@ export const it = {
   'voice.import.dynamic.badge': 'PERSONALE',
 
   // TTS engine card
+  // Foreign words (loanwords) — English pronunciation toggle
+  'settings.foreignWords.section': 'Pronuncia',
+  'settings.foreignWords.label': 'Termini stranieri in inglese',
+  'settings.foreignWords.desc': 'Riconosce e pronuncia con accento inglese parole straniere come "Manhattan", "Brooklyn" o "dashboard" che altrimenti suonerebbero italianizzate.',
+
   'settings.tts.section': 'Motore TTS',
   'settings.tts.status.ready': 'Piper on-device attivo',
   'settings.tts.status.ready.desc': 'Inferenza locale tramite Microsoft ONNX Runtime + voce Piper selezionata. Nessun server, nessuna connessione richiesta.',

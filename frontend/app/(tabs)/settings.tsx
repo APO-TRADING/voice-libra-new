@@ -1,5 +1,5 @@
 import Slider from '@react-native-community/slider';
-import { AlertCircle, AlertTriangle, Check, Copy, Cpu, Mic, Moon, Play, Plus, RefreshCw, Sun, Trash2, X, Volume2 } from 'lucide-react-native';
+import { AlertCircle, AlertTriangle, Check, Copy, Cpu, Globe, Mic, Moon, Play, Plus, RefreshCw, Sun, Trash2, X, Volume2 } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Clipboard, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -18,6 +18,12 @@ import {
   setCurrentVoiceId,
   speakSentence,
 } from '../../src/audio/piperEngine';
+import {
+  ensureEnglishWordsLoaded,
+  isForeignWordsEnabled,
+  refreshForeignWordsFlag,
+  setForeignWordsEnabled,
+} from '../../src/audio/foreignWords';
 import type { VoiceMeta } from '../../src/audio/piperAssets';
 import {
   deleteDynamicVoice,
@@ -44,6 +50,10 @@ export default function SettingsScreen() {
   const [voiceSwitching, setVoiceSwitching] = useState(false);
   const [testRunning, setTestRunning] = useState(false);
   const [importing, setImporting] = useState(false);
+  // v2.7.7: SSML language-switch toggle (foreign-words English pronunciation).
+  // Mirrored from AsyncStorage on mount and persisted through setForeignWordsEnabled().
+  const [foreignWords, setForeignWords] = useState<boolean>(() => isForeignWordsEnabled());
+  const [foreignSwitching, setForeignSwitching] = useState(false);
 
   const activeVoiceMeta = voices.find((v) => v.id === activeVoiceId) || null;
 
@@ -68,8 +78,46 @@ export default function SettingsScreen() {
     (async () => {
       try { setActiveVoiceId(await getCurrentVoiceId()); } catch { /* ignore */ }
       await refreshVoiceCatalog();
+      // v2.7.7: Mirror the persisted toggle into local state on first
+      // render so the Switch shows the correct value after app restart.
+      try {
+        const val = await refreshForeignWordsFlag();
+        setForeignWords(val);
+        // Kick off the wordlist load (it caches the Set so subsequent
+        // toggle flips are free).
+        ensureEnglishWordsLoaded().catch(() => { /* ignore */ });
+      } catch { /* ignore */ }
     })();
   }, [refreshVoiceCatalog]);
+
+  // v2.7.7: handler for the "Pronuncia inglese per termini stranieri" toggle.
+  // Persists the choice, refreshes the in-memory cache used by the
+  // synthesis hot path, and — if a voice is currently loaded — invalidates
+  // any active prebuffer via reloadEngine() so the NEXT sentence picks up
+  // the new behaviour immediately rather than playing the (now stale)
+  // pre-synthesized WAV.
+  const toggleForeignWords = useCallback(async (value: boolean) => {
+    if (foreignSwitching) return;
+    setForeignSwitching(true);
+    try {
+      setForeignWords(value);
+      await setForeignWordsEnabled(value);
+      // Ensure the wordlist is in memory before the next synth happens.
+      if (value) await ensureEnglishWordsLoaded();
+      // Force the engine to discard any prebuffered sentence so the
+      // change is audible from the very next play. Cheap: just resets
+      // the in-flight WAV reference, doesn't re-load the .onnx.
+      if (isPiperReady()) {
+        await reloadEngine().catch(() => { /* ignore */ });
+      }
+    } catch (e: any) {
+      Alert.alert(t('common.error'), String(e?.message || e));
+      // Revert on failure
+      setForeignWords(!value);
+    } finally {
+      setForeignSwitching(false);
+    }
+  }, [foreignSwitching, t]);
 
   const refreshTrace = useCallback(async () => {
     const t = await readPiperTrace();
@@ -470,6 +518,35 @@ export default function SettingsScreen() {
             </Text>
           </TouchableOpacity>
         )}
+      </View>
+
+      <Text style={[styles.section, { color: colors.textSecondary }]}>{t('settings.foreignWords.section').toUpperCase()}</Text>
+      <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+        <View style={styles.row}>
+          <View style={[styles.iconCircle, { backgroundColor: colors.surface2 }]}>
+            <Globe color={foreignWords ? colors.primaryActive : colors.textSecondary} size={18} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.rowTitle, { color: colors.textPrimary }]}>
+              {t('settings.foreignWords.label')}
+            </Text>
+            <Text style={[styles.rowMeta, { color: colors.textSecondary }]}>
+              {t('settings.foreignWords.desc')}
+            </Text>
+          </View>
+          {foreignSwitching ? (
+            <ActivityIndicator size="small" color={colors.primaryActive} />
+          ) : (
+            <Switch
+              testID="foreign-words-switch"
+              value={foreignWords}
+              onValueChange={toggleForeignWords}
+              disabled={foreignSwitching}
+              trackColor={{ true: colors.primaryActive, false: colors.border }}
+              thumbColor={colors.surface}
+            />
+          )}
+        </View>
       </View>
 
       <Text style={[styles.section, { color: colors.textSecondary }]}>{t('settings.tts.section').toUpperCase()}</Text>

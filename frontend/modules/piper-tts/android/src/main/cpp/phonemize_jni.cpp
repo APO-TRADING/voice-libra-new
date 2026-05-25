@@ -105,6 +105,15 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativeSetVoice(
 // output, but Piper VITS models are TRAINED with these tokens (they
 // drive the model's prosody, intonation, and pause timing). The exact
 // algorithm matches rhasspy/piper-phonemize's phonemize_eSpeak().
+//
+// v2.7.7: Auto-detect SSML markup. When the input text contains
+// `<voice ` or `<speak` (the two SSML tags this app uses to switch
+// language for foreign loanwords), we OR `espeakSSML` into the
+// textmode so espeak parses the markup and switches its internal
+// translator per-word — producing e.g. /ˈbɹɔːdweɪ/ for "Broadway"
+// inside an Italian sentence. Plain text without markup is unaffected
+// (the SSML parser is a no-op when no `<` is seen at clause boundaries),
+// so this is fully backwards-compatible with the existing pipeline.
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
     JNIEnv* env, jclass, jstring jText) {
@@ -115,6 +124,19 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
   }
   std::string text = jstringToString(env, jText);
   if (text.empty()) return env->NewStringUTF("");
+
+  // Auto-detect SSML usage: the only tags we emit from JS are
+  // <voice name="en">…</voice> and (optionally) <speak>…</speak>.
+  // Plain-text input never contains these substrings, so the check is
+  // both cheap and unambiguous. If the user's audiobook happens to
+  // contain the literal characters "<voice " (extremely unlikely in
+  // narrative prose), it will be parsed as SSML — acceptable trade-off
+  // since the SSML parser also handles non-markup `<` characters
+  // gracefully (it skips unrecognized tags).
+  const bool useSSML =
+      text.find("<voice ") != std::string::npos ||
+      text.find("<speak")  != std::string::npos;
+  const int textmode = espeakCHARS_UTF8 | (useSSML ? espeakSSML : 0);
 
   // Internal espeak-ng clause-type constants (from src/libespeak-ng/translate.h
   // at the pinned commit). Lower 20 bits encode the punctuation kind.
@@ -142,7 +164,7 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
     int terminator = 0;
     const char* chunk = espeak_TextToPhonemesWithTerminator(
         &textPtr,
-        /*textmode=*/espeakCHARS_UTF8,
+        textmode,
         /*phonememode=*/0x02,
         &terminator);
     if (chunk && *chunk) {

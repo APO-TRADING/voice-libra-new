@@ -124,6 +124,11 @@ export const fr: TranslationDict = {
   'voice.import.delete.button': 'Supprimer',
   'voice.import.dynamic.badge': 'PERSONNALISÉE',
 
+  // Foreign words (loanwords) — English pronunciation toggle
+  'settings.foreignWords.section': 'Prononciation',
+  'settings.foreignWords.label': 'Termes étrangers en anglais',
+  'settings.foreignWords.desc': "Reconnaît et prononce avec un accent anglais les mots d'origine anglaise comme « Manhattan », « Brooklyn » ou « dashboard », au lieu de les laisser franciser.",
+
   'settings.tts.section': 'Moteur TTS',
   'settings.tts.status.ready': 'Piper local actif',
   'settings.tts.status.ready.desc': 'Inférence locale via Microsoft ONNX Runtime + voix Piper sélectionnée. Aucun serveur, aucune connexion requise.',

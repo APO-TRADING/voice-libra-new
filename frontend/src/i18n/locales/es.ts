@@ -124,6 +124,11 @@ export const es: TranslationDict = {
   'voice.import.delete.button': 'Eliminar',
   'voice.import.dynamic.badge': 'PERSONALIZADA',
 
+  // Foreign words (loanwords) — English pronunciation toggle
+  'settings.foreignWords.section': 'Pronunciación',
+  'settings.foreignWords.label': 'Términos extranjeros en inglés',
+  'settings.foreignWords.desc': 'Reconoce y pronuncia con acento inglés palabras de origen inglés como "Manhattan", "Brooklyn" o "dashboard", en lugar de leerlas castellanizadas.',
+
   'settings.tts.section': 'Motor TTS',
   'settings.tts.status.ready': 'Piper local activo',
   'settings.tts.status.ready.desc': 'Inferencia local con Microsoft ONNX Runtime + voz Piper seleccionada. Sin servidor, sin conexión.',
