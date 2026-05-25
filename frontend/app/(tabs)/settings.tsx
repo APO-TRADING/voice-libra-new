@@ -7,6 +7,7 @@ import {
   clearPiperTrace,
   decodePiperError,
   DiagnosticItem,
+  dropEnginePreBuffer,
   getCurrentVoiceId,
   initEngine,
   isPiperReady,
@@ -104,11 +105,13 @@ export default function SettingsScreen() {
       await setForeignWordsEnabled(value);
       // Ensure the wordlist is in memory before the next synth happens.
       if (value) await ensureEnglishWordsLoaded();
-      // Force the engine to discard any prebuffered sentence so the
-      // change is audible from the very next play. Cheap: just resets
-      // the in-flight WAV reference, doesn't re-load the .onnx.
+      // v2.7.7: drop ONLY the prebuffer (a single ~kB WAV file) so the
+      // NEXT sentence picks up the new flag immediately. Crucially we
+      // DO NOT call reloadEngine() — that would unload+reinitialise the
+      // 28 MB .onnx model and re-extract the espeak-ng-data zip, taking
+      // 1-2 seconds for what is conceptually a flag flip.
       if (isPiperReady()) {
-        await reloadEngine().catch(() => { /* ignore */ });
+        await dropEnginePreBuffer('settings-foreign-words').catch(() => { /* ignore */ });
       }
     } catch (e: any) {
       Alert.alert(t('common.error'), String(e?.message || e));

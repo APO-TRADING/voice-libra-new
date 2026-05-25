@@ -623,6 +623,18 @@ async function dropPreBuffer(reason: string): Promise<void> {
 }
 
 /**
+ * v2.7.7: Public surface to drop the prebuffer WITHOUT re-loading the
+ * engine. Used by the "Pronuncia inglese per termini stranieri" toggle
+ * in Settings so the very next sentence picks up the new flag instead
+ * of replaying a stale WAV synthesized with the previous behaviour.
+ * Much cheaper than reloadEngine() (no .onnx re-init, no
+ * espeak-ng-data re-unzip).
+ */
+export async function dropEnginePreBuffer(reason: string = 'external'): Promise<void> {
+  await dropPreBuffer(reason);
+}
+
+/**
  * Synthesize a sentence in the background so the next call to speakSentence
  * can use the result immediately. Returns when synth completes (or fails
  * silently); callers should NOT await this — fire-and-forget.
