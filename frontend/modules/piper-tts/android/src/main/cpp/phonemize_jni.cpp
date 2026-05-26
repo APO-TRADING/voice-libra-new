@@ -137,6 +137,13 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
       text.find("<voice ") != std::string::npos ||
       text.find("<speak")  != std::string::npos;
   const int textmode = espeakCHARS_UTF8 | (useSSML ? espeakSSML : 0);
+  if (useSSML) {
+    // Diagnostic log so the user can grep adb logcat for confirmation
+    // that the SSML pipeline is actually engaged (vs the Italian
+    // Kotlin fallback that would read the tags aloud).
+    LOGI("nativePhonemize: SSML markup detected, espeakSSML flag ON (textmode=0x%x, len=%zu)",
+         textmode, text.size());
+  }
 
   // Internal espeak-ng clause-type constants (from src/libespeak-ng/translate.h
   // at the pinned commit). Lower 20 bits encode the punctuation kind.

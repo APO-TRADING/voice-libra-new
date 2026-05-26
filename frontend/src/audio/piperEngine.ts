@@ -64,6 +64,21 @@ let lastError: string | null = null;
 let lastStep: string = 'idle';
 let currentSampleRate = 22050;
 
+/**
+ * v2.7.7: cached value of the `nativePhonemizer` flag returned by
+ * loadVoice(). When false (espeak-ng JNI failed to load or
+ * nativeSetVoice() returned non-zero for the current voice), the
+ * Italian Kotlin fallback phonemizer is in use — and it does NOT
+ * natively understand SSML tags. To prevent the user from hearing
+ * "less than voice name equals quote en … slash voice" read aloud,
+ * we skip the wrapForeignWords() call entirely in that scenario. The
+ * Italian fallback now ALSO strips any leftover SSML markup defensively
+ * (see ItalianPhonemizer.kt) — that's the second line of defence in
+ * case this flag is wrong for any reason.
+ */
+let nativePhonemizerReady = false;
+export function getNativePhonemizerReady(): boolean { return nativePhonemizerReady; }
+
 // ----- Public types kept identical to the previous engine for compat -----
 export type ProgressInfo = { step: string; percent: number; detail?: string };
 type ProgressCallback = (info: ProgressInfo | null) => void;
@@ -507,6 +522,13 @@ async function doInitEngine(): Promise<boolean> {
     loadedVoiceId = voiceId;
     ready = true;
     lastError = null;
+    // v2.7.7: cache the native-phonemizer ready flag from the load
+    // result so subsequent synthesizeToFile() calls know whether the
+    // espeak-ng JNI path (which understands SSML) is wired up, OR
+    // whether we silently fell back to the Italian Kotlin dictionary
+    // phonemizer (which does NOT). The flag governs whether
+    // wrapForeignWords() is invoked or skipped at synthesis time.
+    nativePhonemizerReady = (result as any)?.nativePhonemizer === true;
     await trace('==INIT.READY==',
       `sr=${result.sampleRate} lang=${result.languageCode}/${result.languageName} ` +
       `phonemes=${result.numSymbols} speakers=${result.numSpeakers} ` +
@@ -668,14 +690,15 @@ export async function prebufferSentence(text: string, lengthScale: number): Prom
   const job = (async () => {
     try {
       await trace('prebuf.synth', `len=${clean.length} speed=${speed.toFixed(2)}`);
-      // v2.7.7: If the user enabled "Pronuncia inglese per termini stranieri",
-      // wrap English loanwords (Manhattan, Brooklyn, dashboard, …) in SSML
-      // `<voice name="en">…</voice>` tags so eSpeak switches its internal
-      // translator per-word. The native JNI auto-detects the `<voice ` substring
-      // and OR-s `espeakSSML` into the textmode. Plain text (toggle OFF) is
-      // unchanged so this is fully backwards-compatible.
+      // v2.7.7: If the user enabled "Pronuncia inglese per termini stranieri"
+      // AND the native espeak-ng phonemizer is in use (the Italian Kotlin
+      // fallback can't interpret SSML), wrap English loanwords (Manhattan,
+      // Brooklyn, …) in <voice name="en">…</voice> tags so eSpeak switches
+      // its internal translator per-word. The JNI auto-detects the
+      // markup and OR-s `espeakSSML` into the textmode. Plain text and
+      // fallback paths are unchanged.
       const srcLang = currentVoiceMeta?.language_code?.split(/[-_]/)[0]?.toLowerCase() || 'it';
-      const wrapped = wrapForeignWords(clean, srcLang);
+      const wrapped = nativePhonemizerReady ? wrapForeignWords(clean, srcLang) : clean;
       const result = await native.synthesizeToFile(wrapped, 0, speed);
       // If a stopSpeak() came in while we were synthesizing, the engine is
       // not "ready" any more — discard the WAV instead of populating the
@@ -758,9 +781,10 @@ export async function speakSentence(
         await trace('speak.synth', `len=${clean.length} speed=${speed.toFixed(2)}`);
         // v2.7.7: see prebufferSentence() above for full rationale on
         // wrapping. Mirror here so the prebuffer-miss path also benefits
-        // from the language switch when the toggle is ON.
+        // from the language switch when the toggle is ON AND the native
+        // phonemizer is in use.
         const srcLang = currentVoiceMeta?.language_code?.split(/[-_]/)[0]?.toLowerCase() || 'it';
-        const wrapped = wrapForeignWords(clean, srcLang);
+        const wrapped = nativePhonemizerReady ? wrapForeignWords(clean, srcLang) : clean;
         const result = await native.synthesizeToFile(wrapped, 0, speed);
         wavPath = result.path;
         synthMs = result.synthMs;
@@ -771,9 +795,11 @@ export async function speakSentence(
       // Stale pre-buffer (different text)? Drop it before synthesizing fresh.
       if (preBuffered) await dropPreBuffer('miss');
       await trace('speak.synth', `len=${clean.length} speed=${speed.toFixed(2)}`);
-      // v2.7.7: wrap loanwords with SSML voice-switch tags if the toggle is on.
+      // v2.7.7: wrap loanwords with SSML voice-switch tags ONLY when the
+      // native espeak-ng JNI is in use (otherwise the Italian fallback
+      // would speak the tags aloud).
       const srcLang = currentVoiceMeta?.language_code?.split(/[-_]/)[0]?.toLowerCase() || 'it';
-      const wrapped = wrapForeignWords(clean, srcLang);
+      const wrapped = nativePhonemizerReady ? wrapForeignWords(clean, srcLang) : clean;
       const result = await native.synthesizeToFile(wrapped, 0, speed);
       wavPath = result.path;
       synthMs = result.synthMs;

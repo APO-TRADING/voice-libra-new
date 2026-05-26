@@ -144,7 +144,33 @@ object ItalianPhonemizer {
    */
   fun phonemize(input: String): String {
     if (input.isBlank()) return ""
-    val text = input.replace(Regex("\\s+"), " ").trim()
+    // v2.7.7: defense in depth — when the JS pre-processor wraps English
+    // loanwords with <voice name="en">…</voice> tags for the native
+    // espeak-ng phonemizer to consume, the SSML-aware native path
+    // handles them transparently. But if the native path is NOT ready
+    // (libpiper_phonemize_jni.so failed to load, nativeInit() returned
+    // non-zero, nativeSetVoice() failed for a non-EU voice, etc.), we
+    // fall through to THIS dictionary-based Italian phonemizer — which
+    // would otherwise read "<", "voice", "/voice", "&lt;" etc. as
+    // literal words, producing the audible "slash voice" / "less than
+    // voice" you'd hear if this branch were silently triggered.
+    //
+    // To make the fallback degrade GRACEFULLY (the loanword loses its
+    // English pronunciation but at least the tag is no longer spoken),
+    // we strip all known SSML markup we ourselves emit, then unescape
+    // the three XML entities we ourselves escape. Anything left over
+    // (literal "<" / ">" in the source book text, which is rare in
+    // narrative prose) is left as-is — the existing punctuation
+    // handler downstream already skips it.
+    val text = input
+        .replace(Regex("<voice\\s+[^>]*>", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("</voice>", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("<speak[^>]*>", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("</speak>", RegexOption.IGNORE_CASE), "")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .replace(Regex("\\s+"), " ").trim()
     if (text.isEmpty()) return ""
 
     val out = StringBuilder(text.length * 2 + 16)
