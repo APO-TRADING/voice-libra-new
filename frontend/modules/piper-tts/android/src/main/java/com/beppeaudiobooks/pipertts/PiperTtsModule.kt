@@ -44,6 +44,13 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
   private var currentSynthJob: Job? = null
   /** true if libpiper_phonemize_jni.so loaded AND nativeInit succeeded. */
   private var nativePhonemizerReady = false
+  // v2.7.7: True only if a runtime canary phonemize() of an SSML tag
+  // produced an English-style short IPA output (proof that the JNI
+  // `phonemize_jni.cpp` was compiled WITH the SSML auto-detect patch
+  // and that the loaded espeak-ng-data supports the en voice). When
+  // false, the JS layer skips the wrapForeignWords() call so plain
+  // text is sent — preventing the tag-as-text bug from being audible.
+  private var nativeSsmlVerified = false
   /** Counter so each WAV gets a unique filename. */
   private var wavCounter = 0
 
@@ -91,6 +98,7 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
     // Phonemizer init (best effort: NDK espeak-ng, fallback to Kotlin
     // dictionary + Italian rule-based fallback for OOV).
     nativePhonemizerReady = false
+    nativeSsmlVerified = false
     try {
       PhonemizerNative.ensureLoaded()
       val initErr = PhonemizerNative.nativeInit(espeakDataPath)
@@ -99,6 +107,39 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
         if (voiceErr == 0) {
           nativePhonemizerReady = true
           Log.i(TAG, "espeak-ng phonemizer ready for voice=${voice.espeakVoice}")
+
+          // v2.7.7 — SELF-TEST SSML SUPPORT.
+          // Even if the JNI bridge loaded and the voice was set, we have
+          // NO guarantee that the compiled-in copy of `phonemize_jni.cpp`
+          // actually contains the auto-detect SSML patch (it might be a
+          // STALE NDK build from a cached EAS layer). Without the patch,
+          // espeak runs in plain-text mode, sees `<voice name="en">`,
+          // strips the `<` and `>` as unknown chars, then reads the words
+          // "voice", "name", "en", "/voice" as ITALIAN text — exactly the
+          // bug the user is reporting.
+          //
+          // To detect this empirically we synthesize-phonemize a tiny
+          // canary string: `<voice name="en">x</voice>`.
+          //   • With the SSML patch: espeak parses the markup, switches
+          //     to English for "x", and produces just one IPA phoneme
+          //     (something like "ˈɛks"). Total output length < 8 chars.
+          //   • Without the patch: espeak reads "voice", "name", "en",
+          //     "x", "voice" as words. Total output length > 20 chars
+          //     and contains italian-phonemized fragments of "voice"
+          //     (typically starts with "vˈɔitʃe" or "vˈɔɪse").
+          //
+          // We use length > 12 as the threshold (very conservative — a
+          // single English "x" phoneme is at most ~4 chars, while even
+          // a single Italian "voice" word phonemizes to 6+ chars).
+          try {
+            val canary = "<voice name=\"en\">x</voice>"
+            val ipa = PhonemizerNative.nativePhonemize(canary)
+            nativeSsmlVerified = ipa.length <= 12 && !ipa.contains("ˈɔ") && !ipa.contains("vo")
+            Log.i(TAG, "SSML self-test: input=${canary.length}ch output=\"$ipa\" (${ipa.length}ch) -> verified=$nativeSsmlVerified")
+          } catch (e: Throwable) {
+            Log.w(TAG, "SSML self-test threw: ${e.message}; assuming SSML NOT supported")
+            nativeSsmlVerified = false
+          }
         } else {
           Log.w(TAG, "espeak nativeSetVoice(${voice.espeakVoice}) -> $voiceErr; falling back to dictionary phonemizer")
         }
@@ -167,11 +208,12 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
       putInt("numSymbols", voice.numSymbols)
       putString("espeakVoice", voice.espeakVoice)
       putBoolean("nativePhonemizer", nativePhonemizerReady)
+      putBoolean("nativeSsmlVerified", nativeSsmlVerified)
       putInt("phonemesDictSize", ItalianPhonemizer.dictionarySize())
       putString("phonemesDictLang", ItalianPhonemizer.dictionaryLanguage())
       putString("executionProvider", engine.executionProvider)
     }
-    Log.i(TAG, "doLoadVoice OK (nativePhonemizer=$nativePhonemizerReady dictLang=${ItalianPhonemizer.dictionaryLanguage()} dictSize=${ItalianPhonemizer.dictionarySize()} EP=${engine.executionProvider})")
+    Log.i(TAG, "doLoadVoice OK (nativePhonemizer=$nativePhonemizerReady ssmlVerified=$nativeSsmlVerified dictLang=${ItalianPhonemizer.dictionaryLanguage()} dictSize=${ItalianPhonemizer.dictionarySize()} EP=${engine.executionProvider})")
     return out
   }
 

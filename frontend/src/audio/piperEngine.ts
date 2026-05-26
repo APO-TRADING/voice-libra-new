@@ -65,19 +65,28 @@ let lastStep: string = 'idle';
 let currentSampleRate = 22050;
 
 /**
- * v2.7.7: cached value of the `nativePhonemizer` flag returned by
- * loadVoice(). When false (espeak-ng JNI failed to load or
- * nativeSetVoice() returned non-zero for the current voice), the
- * Italian Kotlin fallback phonemizer is in use — and it does NOT
- * natively understand SSML tags. To prevent the user from hearing
- * "less than voice name equals quote en … slash voice" read aloud,
- * we skip the wrapForeignWords() call entirely in that scenario. The
- * Italian fallback now ALSO strips any leftover SSML markup defensively
- * (see ItalianPhonemizer.kt) — that's the second line of defence in
- * case this flag is wrong for any reason.
+ * v2.7.7: cached value of the `nativeSsmlVerified` flag returned by
+ * loadVoice(). This flag is TRUE only after a runtime canary test
+ * empirically proved that the JNI was compiled WITH the SSML
+ * auto-detect patch (i.e. the .so in the APK is fresh, not a cached
+ * build from a previous EAS layer). When FALSE:
+ *   • the JS pre-processor SKIPS wrapForeignWords() — plain text is
+ *     sent to the JNI, so eSpeak never sees `<voice>` tags and can't
+ *     read them aloud as Italian words ("voice", "name", "barra"…);
+ *   • the Italian Kotlin fallback's defensive strip (ItalianPhonemizer
+ *     SSML_VOICE_OPEN etc.) is a third safety net.
+ *
+ * The flag is the AND of two preconditions:
+ *   1. the native espeak-ng phonemizer loaded successfully
+ *      (nativeInit + nativeSetVoice == 0)
+ *   2. nativePhonemize("<voice name=\"en\">x</voice>") produced a
+ *      short, English-style output (proof that the JNI patch is in
+ *      this build of libpiper_phonemize_jni.so).
  */
 let nativePhonemizerReady = false;
+let nativeSsmlVerified = false;
 export function getNativePhonemizerReady(): boolean { return nativePhonemizerReady; }
+export function isNativeSsmlVerified(): boolean { return nativeSsmlVerified; }
 
 // ----- Public types kept identical to the previous engine for compat -----
 export type ProgressInfo = { step: string; percent: number; detail?: string };
@@ -528,7 +537,17 @@ async function doInitEngine(): Promise<boolean> {
     // whether we silently fell back to the Italian Kotlin dictionary
     // phonemizer (which does NOT). The flag governs whether
     // wrapForeignWords() is invoked or skipped at synthesis time.
+    //
+    // ssmlVerified is the EMPIRICAL canary-test result from
+    // PiperTtsModule.doLoadVoice: it phonemizes a `<voice>`-wrapped
+    // single-char string and checks the output is short. If the
+    // running .so is a STALE NDK build without the SSML auto-detect
+    // patch, the canary test produces tons of italian phonemes for
+    // "voice", "name", "en" — and the flag stays false, locking the
+    // wrap-call out for safety.
     nativePhonemizerReady = (result as any)?.nativePhonemizer === true;
+    nativeSsmlVerified    = (result as any)?.nativeSsmlVerified === true;
+    await trace('==SSML.PROBE==', `nativePhonemizer=${nativePhonemizerReady} ssmlVerified=${nativeSsmlVerified}`);
     await trace('==INIT.READY==',
       `sr=${result.sampleRate} lang=${result.languageCode}/${result.languageName} ` +
       `phonemes=${result.numSymbols} speakers=${result.numSpeakers} ` +
@@ -690,15 +709,12 @@ export async function prebufferSentence(text: string, lengthScale: number): Prom
   const job = (async () => {
     try {
       await trace('prebuf.synth', `len=${clean.length} speed=${speed.toFixed(2)}`);
-      // v2.7.7: If the user enabled "Pronuncia inglese per termini stranieri"
-      // AND the native espeak-ng phonemizer is in use (the Italian Kotlin
-      // fallback can't interpret SSML), wrap English loanwords (Manhattan,
-      // Brooklyn, …) in <voice name="en">…</voice> tags so eSpeak switches
-      // its internal translator per-word. The JNI auto-detects the
-      // markup and OR-s `espeakSSML` into the textmode. Plain text and
-      // fallback paths are unchanged.
+      // v2.7.7: wrap loanwords ONLY if BOTH the native phonemizer is
+      // ready AND the SSML canary test verified the JNI patch is live.
+      // Without the canary, a stale NDK build would read the tags
+      // aloud as Italian words.
       const srcLang = currentVoiceMeta?.language_code?.split(/[-_]/)[0]?.toLowerCase() || 'it';
-      const wrapped = nativePhonemizerReady ? wrapForeignWords(clean, srcLang) : clean;
+      const wrapped = (nativePhonemizerReady && nativeSsmlVerified) ? wrapForeignWords(clean, srcLang) : clean;
       const result = await native.synthesizeToFile(wrapped, 0, speed);
       // If a stopSpeak() came in while we were synthesizing, the engine is
       // not "ready" any more — discard the WAV instead of populating the
@@ -784,7 +800,7 @@ export async function speakSentence(
         // from the language switch when the toggle is ON AND the native
         // phonemizer is in use.
         const srcLang = currentVoiceMeta?.language_code?.split(/[-_]/)[0]?.toLowerCase() || 'it';
-        const wrapped = nativePhonemizerReady ? wrapForeignWords(clean, srcLang) : clean;
+        const wrapped = (nativePhonemizerReady && nativeSsmlVerified) ? wrapForeignWords(clean, srcLang) : clean;
         const result = await native.synthesizeToFile(wrapped, 0, speed);
         wavPath = result.path;
         synthMs = result.synthMs;
@@ -799,7 +815,7 @@ export async function speakSentence(
       // native espeak-ng JNI is in use (otherwise the Italian fallback
       // would speak the tags aloud).
       const srcLang = currentVoiceMeta?.language_code?.split(/[-_]/)[0]?.toLowerCase() || 'it';
-      const wrapped = nativePhonemizerReady ? wrapForeignWords(clean, srcLang) : clean;
+      const wrapped = (nativePhonemizerReady && nativeSsmlVerified) ? wrapForeignWords(clean, srcLang) : clean;
       const result = await native.synthesizeToFile(wrapped, 0, speed);
       wavPath = result.path;
       synthMs = result.synthMs;
