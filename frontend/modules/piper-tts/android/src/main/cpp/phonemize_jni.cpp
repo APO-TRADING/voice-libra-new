@@ -62,7 +62,12 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativeInit(
   // running .so was compiled FROM this source revision (and not from
   // a stale EAS cache layer). If you don't see it, the cached build
   // is being used and the SSML auto-detect patch may not be present.
-  LOGI("nativeInit: dataPath=%s build=v2.7.7-SSML-CANARY", dataPath.c_str());
+  // FORCE-FORCE marker (after first FORCE-FORCE build was still stale
+  // due to uncommitted-files-on-EAS issue): if you grep this exact
+  // string and see it, then the .so is the one with the SSML auto-
+  // detect logic + the isNotBlank canary guard. If you don't, you
+  // are running an older binary.
+  LOGI("nativeInit: dataPath=%s build=v2.7.7-SSML-FINAL-FORCE", dataPath.c_str());
 
   // AUDIO_OUTPUT_RETRIEVAL means we won't actually output audio — we only
   // need espeak to compute phonemes. Buffer length is in ms (zero means

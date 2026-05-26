@@ -2,7 +2,7 @@
   "expo": {
     "name": "eBook Speaker",
     "slug": "beppe-audiobooks",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "beppe",
@@ -11,6 +11,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.beppe.audiobooks",
+      "buildNumber": "2",
       "infoPlist": {
         "UIBackgroundModes": [
           "audio"
@@ -21,6 +22,7 @@
     },
     "android": {
       "package": "com.beppe.audiobooks",
+      "versionCode": 2,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#0A0A0C"
