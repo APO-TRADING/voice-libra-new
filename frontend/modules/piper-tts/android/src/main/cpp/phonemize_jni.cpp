@@ -38,6 +38,12 @@ extern "C" {
 
 static std::mutex g_mutex;
 static bool       g_initialized = false;
+// v2.7.7 — remember the last voice the user set via nativeSetVoice() so
+// we can switch BACK to it after a per-segment language change during
+// SSML phonemization. (espeak_GetCurrentVoice() can return a different
+// internal voice after we temporarily set "en" mid-sentence, so we
+// can't rely on it — we mirror the truth in this string instead.)
+static std::string g_currentVoice;
 
 // Helper: convert a UTF-8 jstring to std::string.
 static std::string jstringToString(JNIEnv* env, jstring jstr) {
@@ -67,7 +73,7 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativeInit(
   // string and see it, then the .so is the one with the SSML auto-
   // detect logic + the isNotBlank canary guard. If you don't, you
   // are running an older binary.
-  LOGI("nativeInit: dataPath=%s build=v2.7.7-SSML-FINAL-FORCE", dataPath.c_str());
+  LOGI("nativeInit: dataPath=%s build=v2.7.7-SSML-PARSE-MANUAL", dataPath.c_str());
 
   // AUDIO_OUTPUT_RETRIEVAL means we won't actually output audio — we only
   // need espeak to compute phonemes. Buffer length is in ms (zero means
@@ -103,8 +109,68 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativeSetVoice(
     LOGE("espeak_SetVoiceByName(%s) -> %d", voice.c_str(), err);
     return -2;
   }
+  // v2.7.7 — keep the truth so we can restore it after a temporary
+  // per-segment switch during SSML phonemize.
+  g_currentVoice = voice;
   LOGI("voice set to %s", voice.c_str());
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: phonemize a SINGLE plain-text segment with the CURRENT espeak voice.
+// Used both for non-SSML inputs and for each segment of an SSML-parsed input
+// after the voice has been temporarily switched.
+// ---------------------------------------------------------------------------
+static std::string phonemizePlainSegment(const std::string& seg) {
+  if (seg.empty()) return "";
+  // Internal espeak-ng clause-type constants (from src/libespeak-ng/translate.h
+  // at the pinned commit). Lower 20 bits encode the punctuation kind.
+  static constexpr int CLAUSE_TYPE_MASK    = 0x000FFFFF;
+  static constexpr int CLAUSE_PERIOD       = 40 | 0x00000000 | 0x00080000;
+  static constexpr int CLAUSE_COMMA        = 20 | 0x00001000 | 0x00040000;
+  static constexpr int CLAUSE_QUESTION     = 40 | 0x00002000 | 0x00080000;
+  static constexpr int CLAUSE_EXCLAMATION  = 45 | 0x00003000 | 0x00080000;
+  static constexpr int CLAUSE_COLON        = 30 | 0x00000000 | 0x00040000;
+  static constexpr int CLAUSE_SEMICOLON    = 30 | 0x00001000 | 0x00040000;
+
+  const void* textPtr = seg.c_str();
+  std::string result;
+  while (textPtr != nullptr) {
+    int terminator = 0;
+    const char* chunk = espeak_TextToPhonemesWithTerminator(
+        &textPtr,
+        /*textmode=*/espeakCHARS_UTF8,
+        /*phonememode=*/0x02,
+        &terminator);
+    if (chunk && *chunk) {
+      result.append(chunk);
+    }
+    int punct = terminator & CLAUSE_TYPE_MASK;
+    if (punct == CLAUSE_PERIOD)            result.push_back('.');
+    else if (punct == CLAUSE_QUESTION)     result.push_back('?');
+    else if (punct == CLAUSE_EXCLAMATION)  result.push_back('!');
+    else if (punct == CLAUSE_COMMA)        { result.push_back(','); result.push_back(' '); }
+    else if (punct == CLAUSE_COLON)        { result.push_back(':'); result.push_back(' '); }
+    else if (punct == CLAUSE_SEMICOLON)    { result.push_back(';'); result.push_back(' '); }
+  }
+  return result;
+}
+
+// Helper: decode the three XML entities our JS pre-processor emits.
+// We MUST do this AFTER segmenting out the SSML tags, so the literal
+// characters end up inside plain segments that go to espeak.
+static std::string decodeXmlEntities(const std::string& s) {
+  std::string out;
+  out.reserve(s.size());
+  for (size_t i = 0; i < s.size(); ) {
+    if (s[i] == '&') {
+      if (s.compare(i, 4, "&lt;") == 0)   { out += '<'; i += 4; continue; }
+      if (s.compare(i, 4, "&gt;") == 0)   { out += '>'; i += 4; continue; }
+      if (s.compare(i, 5, "&amp;") == 0)  { out += '&'; i += 5; continue; }
+    }
+    out += s[i++];
+  }
+  return out;
 }
 
 // Returns the IPA-phoneme string produced by espeak for the given text.
@@ -115,14 +181,34 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativeSetVoice(
 // drive the model's prosody, intonation, and pause timing). The exact
 // algorithm matches rhasspy/piper-phonemize's phonemize_eSpeak().
 //
-// v2.7.7: Auto-detect SSML markup. When the input text contains
-// `<voice ` or `<speak` (the two SSML tags this app uses to switch
-// language for foreign loanwords), we OR `espeakSSML` into the
-// textmode so espeak parses the markup and switches its internal
-// translator per-word — producing e.g. /ˈbɹɔːdweɪ/ for "Broadway"
-// inside an Italian sentence. Plain text without markup is unaffected
-// (the SSML parser is a no-op when no `<` is seen at clause boundaries),
-// so this is fully backwards-compatible with the existing pipeline.
+// v2.7.7-FINAL-FORCE — PROPER per-segment SSML switch.
+//
+// WHY THE PREVIOUS DESIGN FAILED:
+//   espeak_TextToPhonemesWithTerminator() does NOT honor the espeakSSML
+//   bit in textmode. Only espeak_Synth() (the full audio path) sets
+//   `option_ssml` internally — see src/libespeak-ng/speech.c lines
+//   ~435 (Synthesize sets it) vs ~860 (TextToPhonemes does NOT). So
+//   passing espeakCHARS_UTF8 | espeakSSML was a no-op: the SSML
+//   markup got fed to the Italian translator and produced
+//   "vˈɔitʃe nˈame ʊɡwˈale ˈɛn ˈiks bˈarɾa vˈɔitʃe" instead of
+//   the desired "ˈɛks" for `<voice name="en">x</voice>`.
+//
+// WHAT WE DO INSTEAD:
+//   We parse the SSML markup OURSELVES at the JNI layer. The input is
+//   sliced into segments at every `<voice name="LANG">…</voice>`
+//   boundary. For each segment we (a) optionally call
+//   espeak_SetVoiceByName(LANG) to switch translator, (b) phonemize
+//   the segment with the regular plain-text path, (c) at the end
+//   restore the original voice. Three benefits over the broken flag
+//   approach:
+//     - works with the EXISTING espeak_TextToPhonemes API (no need to
+//       expose internal `option_ssml`)
+//     - the voice switch is RECORDED in the same way nativeSetVoice
+//       does it, so subsequent unrelated calls continue to use the
+//       intended voice
+//     - cheap: at most one extra SetVoiceByName per loanword (and we
+//       cache the active voice so consecutive same-language segments
+//       skip the redundant call)
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
     JNIEnv* env, jclass, jstring jText) {
@@ -134,77 +220,83 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
   std::string text = jstringToString(env, jText);
   if (text.empty()) return env->NewStringUTF("");
 
-  // Auto-detect SSML usage: the only tags we emit from JS are
-  // <voice name="en">…</voice> and (optionally) <speak>…</speak>.
-  // Plain-text input never contains these substrings, so the check is
-  // both cheap and unambiguous. If the user's audiobook happens to
-  // contain the literal characters "<voice " (extremely unlikely in
-  // narrative prose), it will be parsed as SSML — acceptable trade-off
-  // since the SSML parser also handles non-markup `<` characters
-  // gracefully (it skips unrecognized tags).
-  const bool useSSML =
-      text.find("<voice ") != std::string::npos ||
-      text.find("<speak")  != std::string::npos;
-  const int textmode = espeakCHARS_UTF8 | (useSSML ? espeakSSML : 0);
-  if (useSSML) {
-    // Diagnostic log so the user can grep adb logcat for confirmation
-    // that the SSML pipeline is actually engaged (vs the Italian
-    // Kotlin fallback that would read the tags aloud).
-    LOGI("nativePhonemize: SSML markup detected, espeakSSML flag ON (textmode=0x%x, len=%zu)",
-         textmode, text.size());
+  // Fast path: no SSML markup → just phonemize as-is. This is the
+  // ~99% case (toggle OFF, or src lang is `en`, or no loanword
+  // matched).
+  if (text.find("<voice ") == std::string::npos) {
+    std::string out = phonemizePlainSegment(decodeXmlEntities(text));
+    return env->NewStringUTF(out.c_str());
   }
 
-  // Internal espeak-ng clause-type constants (from src/libespeak-ng/translate.h
-  // at the pinned commit). Lower 20 bits encode the punctuation kind.
-  // The CLAUSE_TYPE_SENTENCE bit (in upper bits) signals end-of-sentence.
-  static constexpr int CLAUSE_TYPE_MASK    = 0x000FFFFF;
-  static constexpr int CLAUSE_PERIOD       = 40 | 0x00000000 | 0x00080000;
-  static constexpr int CLAUSE_COMMA        = 20 | 0x00001000 | 0x00040000;
-  static constexpr int CLAUSE_QUESTION     = 40 | 0x00002000 | 0x00080000;
-  static constexpr int CLAUSE_EXCLAMATION  = 45 | 0x00003000 | 0x00080000;
-  static constexpr int CLAUSE_COLON        = 30 | 0x00000000 | 0x00040000;
-  static constexpr int CLAUSE_SEMICOLON    = 30 | 0x00001000 | 0x00040000;
+  // SSML path. We expect the JS pre-processor to emit tags of EXACTLY
+  // this shape: `<voice name="LANG">INNER</voice>`, where LANG is a
+  // bare ISO code recognized by espeak (e.g. "en"). The JS layer
+  // guarantees the markup is well-formed (no nesting, balanced tags,
+  // no leading whitespace inside the open tag). We still defend
+  // against malformed input by skipping any tag we can't parse.
+  LOGI("nativePhonemize: SSML pipeline engaged, len=%zu, baseVoice=%s",
+       text.size(), g_currentVoice.c_str());
 
-  // espeak_TextToPhonemesWithTerminator() reads from a const void**
-  // pointer (a moving cursor into the text), returns a const char* into
-  // an INTERNAL buffer that's reused on each call, AND writes the clause
-  // terminator code into the int* — letting us know if THIS clause ended
-  // with `.`, `,`, `?`, `!`, `:`, or `;` so we can re-inject the proper
-  // punctuation marker into the phoneme stream.
-  //
-  // phonememode = 0x02 → IPA UTF-8 output (bit 1 = use IPA).
-  // Stress markers (ˈ ˌ) and length (ː) are embedded inline by default.
-  const void* textPtr = text.c_str();
+  const std::string baseVoice = g_currentVoice;  // remember so we can restore
+  std::string activeVoice     = baseVoice;       // mirror espeak's actual state
   std::string result;
-  while (textPtr != nullptr) {
-    int terminator = 0;
-    const char* chunk = espeak_TextToPhonemesWithTerminator(
-        &textPtr,
-        textmode,
-        /*phonememode=*/0x02,
-        &terminator);
-    if (chunk && *chunk) {
-      result.append(chunk);
+  size_t pos = 0;
+
+  while (pos < text.size()) {
+    size_t openTag = text.find("<voice ", pos);
+
+    // --- Outer (no-switch) segment: from pos up to openTag (or end). ---
+    size_t outerEnd = (openTag == std::string::npos) ? text.size() : openTag;
+    if (outerEnd > pos) {
+      // Restore the base voice if we drifted away in the previous loop.
+      if (activeVoice != baseVoice) {
+        espeak_SetVoiceByName(baseVoice.c_str());
+        activeVoice = baseVoice;
+      }
+      std::string outer = decodeXmlEntities(text.substr(pos, outerEnd - pos));
+      result += phonemizePlainSegment(outer);
     }
-    // Re-inject the punctuation marker EXACTLY as piper-phonemize does
-    // it for Piper VITS models. See rhasspy/piper-phonemize src/phonemize.cpp.
-    int punct = terminator & CLAUSE_TYPE_MASK;
-    if (punct == CLAUSE_PERIOD) {
-      result.push_back('.');
-    } else if (punct == CLAUSE_QUESTION) {
-      result.push_back('?');
-    } else if (punct == CLAUSE_EXCLAMATION) {
-      result.push_back('!');
-    } else if (punct == CLAUSE_COMMA) {
-      result.push_back(',');
-      result.push_back(' ');
-    } else if (punct == CLAUSE_COLON) {
-      result.push_back(':');
-      result.push_back(' ');
-    } else if (punct == CLAUSE_SEMICOLON) {
-      result.push_back(';');
-      result.push_back(' ');
+    if (openTag == std::string::npos) break;
+
+    // --- Parse the open tag: `<voice name="LANG">` ---
+    size_t nameStart = text.find("name=\"", openTag);
+    if (nameStart == std::string::npos || nameStart > openTag + 32) {
+      pos = openTag + 7;  // skip "<voice " and resync
+      continue;
     }
+    nameStart += 6;
+    size_t nameEnd = text.find('"', nameStart);
+    if (nameEnd == std::string::npos) { pos = openTag + 7; continue; }
+    std::string segVoice = text.substr(nameStart, nameEnd - nameStart);
+    size_t openEnd = text.find('>', nameEnd);
+    if (openEnd == std::string::npos) { pos = openTag + 7; continue; }
+    size_t closeTag = text.find("</voice>", openEnd);
+    if (closeTag == std::string::npos) {
+      // Unclosed tag — treat the rest as a single inner segment.
+      closeTag = text.size();
+    }
+    // Inner segment between '>' and '</voice>'.
+    std::string inner = decodeXmlEntities(
+        text.substr(openEnd + 1, closeTag - openEnd - 1));
+
+    if (!inner.empty()) {
+      if (segVoice != activeVoice) {
+        if (espeak_SetVoiceByName(segVoice.c_str()) == EE_OK) {
+          activeVoice = segVoice;
+        } else {
+          LOGE("nativePhonemize: SetVoiceByName(%s) failed, keeping %s",
+               segVoice.c_str(), activeVoice.c_str());
+        }
+      }
+      result += phonemizePlainSegment(inner);
+    }
+    // Advance past the close tag (or to EOF if unclosed).
+    pos = (closeTag == text.size()) ? text.size() : (closeTag + 8);
+  }
+
+  // --- Restore the base voice so subsequent unrelated calls are unaffected. ---
+  if (activeVoice != baseVoice && !baseVoice.empty()) {
+    espeak_SetVoiceByName(baseVoice.c_str());
   }
   return env->NewStringUTF(result.c_str());
 }
