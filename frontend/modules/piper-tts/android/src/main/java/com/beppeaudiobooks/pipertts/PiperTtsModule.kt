@@ -122,22 +122,53 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
           // canary string: `<voice name="en">x</voice>`.
           //   • With the SSML patch: espeak parses the markup, switches
           //     to English for "x", and produces just one IPA phoneme
-          //     (something like "ˈɛks"). Total output length < 8 chars.
+          //     (something like "ˈɛks"). Total output length ≤ 4 chars.
           //   • Without the patch: espeak reads "voice", "name", "en",
-          //     "x", "voice" as words. Total output length > 20 chars
-          //     and contains italian-phonemized fragments of "voice"
-          //     (typically starts with "vˈɔitʃe" or "vˈɔɪse").
+          //     "x", "voice" as ITALIAN words and the symbols too:
+          //         vˈɔitʃe nˈame ʊɡwˈale ˈɛn ˈiks bˈarɾa vˈɔitʃe
+          //     ~42 chars, contains the stressed open-O `ˈɔ` from
+          //     `vˈɔitʃe` (the italian phonemes for "voice"). Note that
+          //     the literal ASCII bigram "vo" is NEVER produced — the
+          //     "v" is followed by a stress mark `ˈ` then `ɔ` (IPA
+          //     open-O U+0254). The `!contains("vo")` check is therefore
+          //     a defensive no-op for the v=true branch and is kept
+          //     mostly as documentation; the real discriminator is the
+          //     length and the `ˈɔ` check (verified empirically on
+          //     espeak-ng pinned commit).
           //
-          // We use length > 12 as the threshold (very conservative — a
-          // single English "x" phoneme is at most ~4 chars, while even
-          // a single Italian "voice" word phonemizes to 6+ chars).
+          // EDGE CASES the original draft missed (fixed here):
+          //   (a) ipa is NULL or empty: would have passed length≤12
+          //       and the !contains() checks (both vacuously true on
+          //       empty string), wrongly setting verified=true and
+          //       sending tags to the broken phonemizer. We now
+          //       guard with isNotBlank() as the FIRST conjunct.
+          //   (b) ipa contains only whitespace or punctuation: same
+          //       failure mode. isNotBlank() also covers this.
+          //   (c) The native call throws (UnsatisfiedLinkError if the
+          //       .so is missing entirely, RuntimeException from a
+          //       broken espeak voice file, etc.): caught by the
+          //       outer try { … } catch (Throwable) and we set
+          //       verified=false. The app continues to run in
+          //       fallback mode without crashing.
           try {
             val canary = "<voice name=\"en\">x</voice>"
-            val ipa = PhonemizerNative.nativePhonemize(canary)
-            nativeSsmlVerified = ipa.length <= 12 && !ipa.contains("ˈɔ") && !ipa.contains("vo")
+            val ipa: String = try {
+              PhonemizerNative.nativePhonemize(canary) ?: ""
+            } catch (innerEx: Throwable) {
+              Log.w(TAG, "SSML self-test: nativePhonemize() threw ${innerEx.javaClass.simpleName}: ${innerEx.message}")
+              ""
+            }
+            nativeSsmlVerified =
+                ipa.isNotBlank() &&
+                ipa.length in 1..12 &&
+                !ipa.contains("ˈɔ") &&  // catches italian "vˈɔitʃe" (voice)
+                !ipa.contains("ʊɡw")    // catches italian "ʊɡwˈale" (=)
             Log.i(TAG, "SSML self-test: input=${canary.length}ch output=\"$ipa\" (${ipa.length}ch) -> verified=$nativeSsmlVerified")
           } catch (e: Throwable) {
-            Log.w(TAG, "SSML self-test threw: ${e.message}; assuming SSML NOT supported")
+            // Belt-and-braces: should never fire (inner try already
+            // catches Throwable), but if a fatal Error propagates we
+            // still want the app to boot.
+            Log.w(TAG, "SSML self-test outer-catch: ${e.javaClass.simpleName}: ${e.message}")
             nativeSsmlVerified = false
           }
         } else {
