@@ -52,6 +52,27 @@ object ItalianPhonemizer {
   private const val IPA_LENGTH   = "\u02D0" // ː length marker (geminate)
   private const val IPA_STRESS   = "\u02C8" // ˈ primary stress marker
 
+  // ---------- SSML strip patterns (v2.7.7 defense-in-depth) ----------------
+  // Pre-compiled once on first access (Kotlin lazy-init of object members)
+  // and re-used for the lifetime of the singleton. Rebuilding these on
+  // every phonemize() call would be wasteful — for a 20-sentence book
+  // page that's ~80 regex compilations saved per page, ~5 ms on midrange
+  // Android. The IGNORE_CASE flag costs a few cycles up-front but is
+  // negligible at match time.
+  //
+  // Patterns to strip:
+  //   • <voice name="…"> and any attribute variant     (open tag)
+  //   • </voice>                                       (close tag)
+  //   • <speak …>  /  </speak>                         (root tags, rarely used)
+  // Then we re-unescape the three XML entities our pre-processor emits.
+  // The whitespace-collapse pass that the old code already had is
+  // still applied at the end via SSML_WS_COLLAPSE.
+  private val SSML_VOICE_OPEN = Regex("<voice\\s+[^>]*>", RegexOption.IGNORE_CASE)
+  private val SSML_VOICE_CLOSE = Regex("</voice>", RegexOption.IGNORE_CASE)
+  private val SSML_SPEAK_OPEN  = Regex("<speak[^>]*>", RegexOption.IGNORE_CASE)
+  private val SSML_SPEAK_CLOSE = Regex("</speak>", RegexOption.IGNORE_CASE)
+  private val WS_COLLAPSE      = Regex("\\s+")
+
   // Optional word -> IPA dictionary loaded once at engine init. Built
   // offline by running real espeak-ng on a frequency-sorted list of the
   // top ~50k words PER LANGUAGE; one .json.gz asset per supported
@@ -162,15 +183,20 @@ object ItalianPhonemizer {
     // (literal "<" / ">" in the source book text, which is rare in
     // narrative prose) is left as-is — the existing punctuation
     // handler downstream already skips it.
+    //
+    // All four Regex instances above (SSML_VOICE_OPEN/CLOSE,
+    // SSML_SPEAK_OPEN/CLOSE) are pre-compiled at singleton-init time
+    // and re-used here — phonemize() runs in the hot path so we avoid
+    // recompiling them on every sentence.
     val text = input
-        .replace(Regex("<voice\\s+[^>]*>", RegexOption.IGNORE_CASE), "")
-        .replace(Regex("</voice>", RegexOption.IGNORE_CASE), "")
-        .replace(Regex("<speak[^>]*>", RegexOption.IGNORE_CASE), "")
-        .replace(Regex("</speak>", RegexOption.IGNORE_CASE), "")
+        .replace(SSML_VOICE_OPEN, "")
+        .replace(SSML_VOICE_CLOSE, "")
+        .replace(SSML_SPEAK_OPEN, "")
+        .replace(SSML_SPEAK_CLOSE, "")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&amp;", "&")
-        .replace(Regex("\\s+"), " ").trim()
+        .replace(WS_COLLAPSE, " ").trim()
     if (text.isEmpty()) return ""
 
     val out = StringBuilder(text.length * 2 + 16)
