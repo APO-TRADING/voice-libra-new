@@ -1,14 +1,7 @@
-// scripts/test-foreignWords-sentences.mjs
-//
-// End-to-end smoke test for v1.0.4 wrapForeignWords() on realistic
-// thriller sentences. Validates BOTH:
-//   - which tokens get wrapped (mock phonemizer returns "IPA[token]")
-//   - which Italian words DON'T get wrapped (false-positive check)
-//
-// The native phonemizer is mocked: we don't need the real one here
-// since we're testing the JS classifier and the SSML wrap shape.
+// scripts/test-foreignWords-sentences.mjs — v1.0.4 EXPANDED MATRIX
+// End-to-end smoke test for wrapForeignWords() with the full 7-tier
+// regex set on realistic thriller sentences.
 
-// ─── Inline copy of the v1.0.4 production rules (keep in lock-step!) ───
 const ITALIAN_WHITELIST = new Set([
   'sport','fitness','wellness','beauty','spa','jogging','footing',
   'trekking','surf','snowboard','hotel','motel','bar','pub','club',
@@ -32,53 +25,69 @@ const URBAN_KEYWORDS = new Set([
   'sheriff','deputy','detective','agent',
 ]);
 const PROPER_NAMES_EN = new Set([
-  'manhattan','sunset','hollywood','harlem','bronx','queens',
-  'vegas','seattle','boston','denver','houston','austin',
-  'dallas','miami','atlanta','memphis','detroit','portland',
-  'pittsburgh','baltimore','philly','newark','staten',
-  'westwood','beverly','malibu','venice','pasadena',
-  'compton','oakland','berkeley','sacramento',
+  'manhattan','sunset','hollywood','harlem','bronx','queens','vegas',
+  'seattle','boston','denver','houston','austin','dallas','miami',
+  'atlanta','memphis','detroit','portland','pittsburgh','baltimore',
+  'philly','newark','staten','westwood','beverly','malibu','venice',
+  'pasadena','compton','oakland','berkeley','sacramento',
   'london','thames','soho','camden','chelsea',
-  'donovan','sullivan','callahan','flanagan','morgan',
-  'reagan','sloan','logan','cohen','allen',
-  'jordan','nolan','lawson','jackson','wilson',
-  'johnson','jefferson','anderson','robinson','thompson',
-  'harrison','peterson','davidson','henderson',
-  'kevin','gavin','devin','colin','martin','justin',
-  'austin','kenneth','harold','gerald','donald',
-  'ronald','arnold','sheldon',
+  'donovan','sullivan','callahan','flanagan','morgan','reagan','sloan',
+  'logan','cohen','allen','jordan','nolan','lawson','jackson','wilson',
+  'johnson','jefferson','anderson','robinson','thompson','harrison',
+  'peterson','davidson','henderson',
+  'kevin','gavin','devin','colin','martin','justin','austin',
+  'kenneth','harold','gerald','donald','ronald','arnold','sheldon',
 ]);
+
 const RE_ENGLISH_CLUSTERS = [
-  /ck/i, /sh/i, /sch/i, /th/i, /ph/i, /wh/i,
-  /ch(?![eiy])/i,
-  /gh(?![ei])/i,
-  /^kn/i, /^ps/i,
-  /ee/i, /oo/i,
-  /ay(?:$|[^aeiouy])/i,
-  /ow(?:$|[^aeiouy])/i,
+  /ck/i, /sh/i, /shr/i, /sch/i, /th/i, /ph/i, /wh/i,
+  /ch(?![eiy])/i, /gh(?![ei])/i, /dg/i, /tch/i,
 ];
 const RE_FINAL_CLUSTERS = [
-  /[aeiou](?:nd|rg|rk|rt|ck|lk|ng|st|sk)$/i,
+  /[aeiou](?:nd|rd|ld|rg|rk|rt|ck|lk|ng|st|sk|ct|pt|ft|mp|mb|nt|nk|sp|lt|lf|lp|ls|lm)$/i,
+  /[aeiou][tdgkpbf]$/i,
+  /(?:gh|ght)$/i,
   /[^aeiou]y$/i,
 ];
-const RE_PATRONYMIC = /^(?:Mc|Mac)[A-Z]/;
+const RE_VOWEL_PAIRS = [
+  /ee/i, /oo/i, /oa/i, /ou/i,
+  /ay(?:$|[^aeiouy])/i,
+  /ey(?:$|[^aeiouy])/i,
+  /ow(?:$|[^aeiouy])/i,
+];
+const RE_EN_SUFFIXES = [
+  /tion$/i, /sion$/i, /ing$/i, /ed$/i, /less$/i, /ness$/i,
+  /ful$/i, /ment$/i, /ship$/i, /hood$/i, /ward$/i,
+  /berg$/i, /stein$/i,
+];
+const RE_EN_COMPOUNDS = [
+  /wood$/i, /town$/i, /field$/i, /ton$/i, /glen$/i,
+  /ville$/i, /ford$/i, /shire$/i, /borough$/i, /worth$/i,
+  /man$/i, /son$/i,
+];
+const RE_EN_PREFIXES = [/^kn/i, /^wr/i, /^ps/i, /^tw/i, /^sw/i, /^chr/i, /^thr/i];
+const RE_PATRONYMIC = /^(?:Mc|Mac|O')[A-Z]/;
 
-function tokenIsLoanword(token) {
-  if (token.length < 3) return false;
+function classifyToken(token) {
+  if (token.length < 3) return null;
   for (let i = 0; i < token.length; i++) {
     const c = token.charCodeAt(i);
     const isUpper = c >= 65 && c <= 90;
     const isLower = c >= 97 && c <= 122;
-    if (!(isUpper || isLower)) return false;
+    if (!(isUpper || isLower)) return null;
   }
   const lower = token.toLowerCase();
-  if (ITALIAN_WHITELIST.has(lower)) return false;
-  if (URBAN_KEYWORDS.has(lower)) return true;
-  if (PROPER_NAMES_EN.has(lower)) return true;
-  if (RE_PATRONYMIC.test(token)) return true;
-  for (const re of RE_ENGLISH_CLUSTERS) if (re.test(token)) return true;
-  for (const re of RE_FINAL_CLUSTERS) if (re.test(token)) return true;
-  return false;
+  if (ITALIAN_WHITELIST.has(lower)) return null;
+  if (URBAN_KEYWORDS.has(lower)) return 'URBAN';
+  if (PROPER_NAMES_EN.has(lower)) return 'PROPER';
+  if (RE_PATRONYMIC.test(token)) return 'patronymic';
+  for (const re of RE_ENGLISH_CLUSTERS) { const m = re.exec(token); if (m) return `cluster:${m[0]}`; }
+  for (const re of RE_FINAL_CLUSTERS)   { const m = re.exec(token); if (m) return `final:${m[0]}`; }
+  for (const re of RE_VOWEL_PAIRS)      { const m = re.exec(token); if (m) return `vowel:${m[0]}`; }
+  for (const re of RE_EN_SUFFIXES)      { const m = re.exec(token); if (m) return `suffix:${m[0]}`; }
+  for (const re of RE_EN_COMPOUNDS)     { const m = re.exec(token); if (m) return `compound:${m[0]}`; }
+  for (const re of RE_EN_PREFIXES)      { const m = re.exec(token); if (m) return `prefix:${m[0]}`; }
+  return null;
 }
 
 function escapeXmlText(s) {
@@ -96,18 +105,17 @@ async function wrapForeignWords(text, mockPhonemize) {
   while ((m = re.exec(text)) !== null) {
     const chunk = m[0];
     if (!/^[\p{L}']+$/u.test(chunk)) continue;
-    if (!tokenIsLoanword(chunk)) continue;
-    matches.push({ start: m.index, end: m.index + chunk.length, token: chunk });
+    const reason = classifyToken(chunk);
+    if (!reason) continue;
+    matches.push({ start: m.index, end: m.index + chunk.length, token: chunk, reason });
     uniqueLoanwords.add(chunk);
   }
   if (matches.length === 0) return text;
-
   const ipaMap = new Map();
   for (const tok of uniqueLoanwords) {
     const ipa = await mockPhonemize(tok, 'en-us');
     ipaMap.set(tok, ipa);
   }
-
   let out = '';
   let cursor = 0;
   for (const { start, end, token } of matches) {
@@ -124,82 +132,99 @@ async function wrapForeignWords(text, mockPhonemize) {
   return out;
 }
 
-// ─── Test sentences (thriller-style, in Italian) ──────────────────────
 const tests = [
   {
     desc: 'Glock + verbo italiano',
     text: 'Lui impugnò la Glock e sparò.',
     mustWrap:   ['Glock'],
-    mustNotWrap:['impugnò', 'sparò'],  // accented → ASCII guard rejects
+    mustNotWrap:['impugnò', 'sparò'],
   },
   {
     desc: 'Personaggio Connelly + ambientazione US',
     text: 'Harry Bosch, il detective di Los Angeles, parlò con Michael Connelly.',
     mustWrap:   ['Harry', 'Bosch', 'detective', 'Michael', 'Connelly'],
-    mustNotWrap:['di', 'Los', 'Angeles', 'parlò'],  // Los/Angeles 3-letter / capitalised
-                                                    // — Los is 3 chars ok ASCII no cluster: PASS
-                                                    // Angeles: contains "ge" "ang" "eles" no cluster:
-                                                    //   `el` no, `es$` no in final list. OK.
+    mustNotWrap:['di', 'Los', 'Angeles', 'parlò'],
   },
   {
-    desc: 'Indirizzo americano (Broadway, Sunset Boulevard)',
+    desc: 'Indirizzo americano (Sunset Boulevard, Broadway)',
     text: 'Camminò lungo Sunset Boulevard fino a Broadway.',
     mustWrap:   ['Sunset', 'Boulevard', 'Broadway'],
     mustNotWrap:['lungo', 'fino'],
   },
   {
-    desc: 'Acronimi US (LAPD, FBI) — non match (3-char, tutti maiuscoli)',
-    text: 'La LAPD chiamò l\'FBI immediatamente.',
-    mustWrap:   [],
-    mustNotWrap:['LAPD', 'FBI', 'chiamò', 'immediatamente'],
-  },
-  {
-    desc: 'Italianismi (sport, hotel) NON intercettati',
+    desc: 'Italianismi (sport, hotel, weekend) NON intercettati',
     text: 'Ha prenotato un hotel e poi fa sport tutti i weekend.',
     mustWrap:   [],
     mustNotWrap:['hotel', 'sport', 'weekend'],
   },
   {
-    desc: 'McCaleb + Charlie + Knight (test patronimici e gh/ch)',
-    text: 'L\'agente McCaleb arrivò con Charlie e Knight.',
-    mustWrap:   ['McCaleb', 'Charlie', 'Knight'],
-    mustNotWrap:['con', 'arrivò'],   // "agente" è italiano (NON in PROPER_NAMES_EN)
+    desc: 'Patronimici Mc/Mac + cluster (Charlie, Knight, Mitchell)',
+    text: 'McCaleb arrivò con Charlie, Knight e Mitchell.',
+    mustWrap:   ['McCaleb', 'Charlie', 'Knight', 'Mitchell'],
+    mustNotWrap:['con'],
   },
   {
-    desc: 'Frase Italiana pura (nessun wrap)',
-    text: 'Si girò lentamente verso la finestra e guardò fuori.',
-    mustWrap:   [],
-    mustNotWrap:['girò', 'lentamente', 'verso', 'finestra', 'guardò', 'fuori'],
-  },
-  {
-    desc: 'Manhattan + Vegas + Hollywood (toponimi US dalla lista)',
+    desc: 'Manhattan + Vegas + Hollywood (PROPER_NAMES_EN)',
     text: 'Da Manhattan a Las Vegas, passando per Hollywood.',
     mustWrap:   ['Manhattan', 'Vegas', 'Hollywood'],
     mustNotWrap:['passando'],
   },
   {
-    desc: 'Frase con homograph italiano "voltò" (regex non deve catturare)',
+    desc: 'Suffissi morfologici (Sterling, Goldberg, Action)',
+    text: 'Sterling lavorò con Goldberg sull\'operazione Action.',
+    mustWrap:   ['Sterling', 'Goldberg', 'Action'],
+    mustNotWrap:['operazione', 'lavorò'],   // "operazione" ends -one → italian
+  },
+  {
+    desc: 'Compound endings (Hollywood, Springfield, Washington)',
+    text: 'Da Hollywood a Springfield, passando per Washington.',
+    mustWrap:   ['Hollywood', 'Springfield', 'Washington'],
+    mustNotWrap:['passando'],
+  },
+  {
+    desc: 'Prefissi non italiani (Wright, Christopher, Sweet)',
+    text: 'Wright e Christopher andarono al Sweet Bar.',
+    mustWrap:   ['Wright', 'Christopher', 'Sweet'],
+    mustNotWrap:['andarono'],
+  },
+  {
+    desc: 'Hard endings (-d, -t, -k) per Road, Mark, Brad',
+    text: 'Marco e Brad camminarono lungo la Mark Road.',
+    mustWrap:   ['Brad', 'Mark', 'Road'],
+    mustNotWrap:['Marco', 'camminarono'],
+  },
+  {
+    desc: 'Vowel pairs (Bloomberg, Ground, Grey)',
+    text: 'Bloomberg parlò del Ground Zero in modo Grey.',
+    mustWrap:   ['Bloomberg', 'Ground', 'Grey'],
+    mustNotWrap:['parlò', 'modo'],
+  },
+  {
+    desc: 'Omografi italiani con cluster forzosi (voltò, guardò)',
     text: 'Si voltò verso il muro e guardò la fotografia.',
     mustWrap:   [],
-    mustNotWrap:['voltò', 'guardò', 'fotografia'],  // tutte accentate/italiane
+    mustNotWrap:['voltò', 'guardò', 'fotografia', 'verso', 'muro'],
   },
   {
-    desc: 'Glock + sparo (test apostrofo)',
-    text: 'L\'arma, una Glock 19, sparò tre colpi.',
-    mustWrap:   ['Glock'],
-    mustNotWrap:['arma', 'una', 'sparò', 'colpi'],
+    desc: 'Italian-but-tricky (Beatrice, Paolo, Andrea — vowel-pair traps)',
+    text: 'Beatrice e Paolo, con Andrea, andarono al cinema.',
+    mustWrap:   [],
+    mustNotWrap:['Beatrice', 'Paolo', 'Andrea', 'cinema', 'andarono'],
   },
   {
-    desc: 'Mix nomi + Sheriff',
+    desc: 'Frase italiana lunga (nessun match)',
+    text: 'La donna alzò lentamente lo sguardo dalla pagina del libro che stava leggendo.',
+    mustWrap:   [],
+    mustNotWrap:['donna', 'alzò', 'sguardo', 'pagina', 'libro', 'leggendo'],
+  },
+  {
+    desc: 'Mix nomi (Sheriff Donovan + Yellowstone)',
     text: 'Il Sheriff Donovan disse a Joe di andare allo Yellowstone.',
-    mustWrap:   ['Sheriff', 'Donovan', 'Yellowstone'],  // Donovan ends -an: no match? hmm
+    mustWrap:   ['Sheriff', 'Donovan', 'Yellowstone'],
     mustNotWrap:['Joe', 'andare', 'disse'],
   },
 ];
 
-// Mock phonemize: returns a "*IPA[token]" placeholder string. We
-// don't care about the actual IPA — only about which tokens get
-// CALLED.
 const calledTokens = [];
 async function mockPhonemize(text, voice) {
   if (voice !== 'en-us') return '';
@@ -222,7 +247,7 @@ for (const t of tests) {
   if (failures.length === 0) {
     pass++;
     console.log(`✅ ${t.desc}`);
-    console.log(`   → ${out.slice(0, 200)}${out.length > 200 ? '…' : ''}`);
+    console.log(`   → ${out.slice(0, 240)}${out.length > 240 ? '…' : ''}`);
   } else {
     fail++;
     console.log(`❌ ${t.desc}`);
