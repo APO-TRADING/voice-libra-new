@@ -46,6 +46,13 @@ const { TTSManager } = NativeModules as {
     stopPlayback: () => Promise<void>;
     deleteWavFile: (path: string) => Promise<boolean>;
     cleanupWavCache: () => Promise<number>;
+    /**
+     * v1.0.4 — JIT phonemize. Returns the IPA stream produced by
+     * espeak when `voice` is active (e.g. "en-us"). Resolves with ""
+     * on any failure — the caller is responsible for falling back to
+     * plain text without an SSML wrap.
+     */
+    phonemizeAs?: (text: string, voice: string) => Promise<string>;
   };
 };
 

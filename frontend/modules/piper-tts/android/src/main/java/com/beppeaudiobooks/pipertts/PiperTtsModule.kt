@@ -315,6 +315,16 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
           return@launch
         }
         val t0 = System.currentTimeMillis()
+        // v1.0.4 — log the EXACT SSML/text string that goes to the
+        // phonemizer. This is the user-requested debug hook: it lets us
+        // verify that <phoneme alphabet="espeak" ph="…">word</phoneme>
+        // tags reach the JNI with their IPA payload intact (UTF-8 stress
+        // marks and modifier letters un-corrupted by the RN bridge).
+        // Truncated at 240 chars to keep logcat readable on long sentences.
+        if (cleanText.contains("<phoneme") || cleanText.contains("<voice")) {
+          val preview = if (cleanText.length > 240) cleanText.substring(0, 240) + "…(${cleanText.length}ch)" else cleanText
+          Log.d(TAG, "SSML→Piper: $preview")
+        }
         // 1. Phonemize
         val ipa = withContext(Dispatchers.Default) {
           if (nativePhonemizerReady) PhonemizerNative.nativePhonemize(cleanText)
@@ -367,6 +377,63 @@ class PiperTtsModule(private val reactContext: ReactApplicationContext)
       promise.resolve(null)
     } catch (e: Throwable) {
       promise.reject("E_STOP", e.message ?: e.javaClass.simpleName, e)
+    }
+  }
+
+  /**
+   * v1.0.4 — JIT phonemize entrypoint exposed to JS.
+   *
+   * Given a single word (or short phrase) and an espeak voice id
+   * (e.g. "en-us"), return the IPA phoneme string produced by espeak
+   * when that voice is active. The previously-set voice is restored
+   * automatically on the native side BEFORE this method resolves —
+   * so subsequent `synthesizeToFile()` calls continue to use the
+   * voice configured at `loadVoice()` time.
+   *
+   * This is the JIT pre-computation primitive consumed by
+   * `frontend/src/audio/foreignWords.ts` to enrich each chunk with
+   * `<phoneme alphabet="espeak" ph="…">…</phoneme>` SSML BEFORE the
+   * chunk is handed to `synthesizeToFile()`. The JS layer makes
+   * 0–5 calls per chunk on the same background thread, so the
+   * native mutex never sees real contention.
+   *
+   * Returns the IPA string, OR an empty string on failure (engine
+   * not initialised, voice unknown, empty input). The JS caller MUST
+   * tolerate the empty string by falling back to plain-text output
+   * without the SSML wrap.
+   */
+  @ReactMethod
+  fun phonemizeAs(text: String, voice: String, promise: Promise) {
+    if (!nativePhonemizerReady) {
+      // Engine wasn't booted (e.g. running on a build without the
+      // libpiper_phonemize_jni.so). Resolve with "" so the JS layer
+      // can fall back to plain text — never reject, the caller treats
+      // an empty result as a soft no-op.
+      promise.resolve("")
+      return
+    }
+    ttsScope.launch {
+      try {
+        val ipa: String = withContext(Dispatchers.Default) {
+          try {
+            PhonemizerNative.nativePhonemizeAs(text, voice) ?: ""
+          } catch (innerEx: Throwable) {
+            Log.w(TAG, "phonemizeAs(\"$text\", \"$voice\") threw ${innerEx.javaClass.simpleName}: ${innerEx.message}")
+            ""
+          }
+        }
+        // Debug log so we can verify the IPA string travels correctly
+        // across the JNI bridge and through the RN serializer without
+        // losing UTF-8 stress marks (ˈ, ˌ) or modifier letters.
+        Log.d(TAG, "phonemizeAs(\"$text\", \"$voice\") -> \"$ipa\" (${ipa.length}ch)")
+        promise.resolve(ipa)
+      } catch (e: Throwable) {
+        Log.e(TAG, "phonemizeAs failed", e)
+        // Resolve with "" instead of rejecting: the caller is happy
+        // to fall back to plain text. Avoids surfacing a JS exception
+        // on the audiobook hot path.
+        promise.resolve("")
+      }
     }
   }
 

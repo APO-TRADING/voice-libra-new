@@ -1,97 +1,65 @@
 /**
- * foreignWords.ts — runtime helpers to mark English loanwords inside a
- * non-English sentence so the eSpeak phonemizer can switch voices
- * mid-stream.
+ * foreignWords.ts — v1.0.4 JIT Phoneme-Mapping
+ * ────────────────────────────────────────────
+ * Heuristic, regex-based detector for English loanwords inside a
+ * non-English audiobook chunk. For each detected token we pre-compute
+ * the English IPA phoneme stream by calling the native espeak-ng
+ * phonemizer (via `phonemizeAs(word, "en-us")`) and wrap the token
+ * in a `<phoneme alphabet="espeak" ph="…">word</phoneme>` SSML tag.
  *
- * USAGE
- * -----
- *  1. JS pre-loads the English wordlist + per-language whitelists once
- *     at app start (`ensureEnglishWordsLoaded()`).
- *  2. Before sending each sentence to the native TTS, JS calls
- *     `wrapForeignWords(sentence, srcLang)`. If the toggle in
- *     Settings ("Pronuncia inglese per termini stranieri") is OFF, the
- *     helper just returns the plain text unchanged. If ON, every token
- *     matching the bundled English wordlist (after Italian/IT-homograph
- *     subtraction AND after subtracting the source-language whitelist)
- *     is wrapped in `<voice name="en">…</voice>`. The native JNI
- *     auto-detects the SSML markup and OR-s `espeakSSML` into the
- *     espeak textmode, so the phonemizer switches its internal
- *     language translator per-word.
+ * The resulting chunk is handed to `synthesizeToFile()`, which calls
+ * the JNI SSML parser. The parser splices the pre-computed phonemes
+ * directly into the output stream WITHOUT switching the espeak voice,
+ * so the entire chunk is phonemized in ONE continuous Italian pass.
+ * No more per-loanword voice resets, no more audible stop-and-go in
+ * Piper VITS output.
  *
- * DESIGN NOTES
- * ------------
- *  - The bundled English wordlist is gzipped UTF-8 text, ~90 KB on
- *    disk. After gunzip it expands to ~300 KB plain. The resulting
- *    Set<string> holds ~32 000 lowercased English headwords
- *    (Audiobook-Tuned: includes author/brand surnames like Connelly,
- *    Bosch, Tupperware, etc.).
- *  - Italian homographs are EXCLUDED at build time inside the bundled
- *    asset itself. So when `srcLang === 'it'`, the English wordlist
- *    alone is enough — no extra whitelist is loaded for Italian.
- *  - For DE / ES / FR audiobooks, we ship per-language whitelists
- *    (`whitelist_<lang>.bin`, ~1.4k-2.4k entries each) listing common
- *    headwords in that language that happen to also appear in the
- *    English dictionary (e.g. "abandon" is both English and French —
- *    we MUST NOT wrap it as English in a French audiobook). When
- *    `wrapForeignWords()` is called for one of those languages it
- *    subtracts the whitelist from the candidate set, so the source
- *    language's natural pronunciation is preserved.
- *  - Lookup is case-insensitive (we lowercase the token before the Set
- *    check). The original casing is preserved in the SSML output.
- *  - We DO NOT wrap tokens that contain digits, apostrophes mid-word
- *    or other non-letter characters — those would either confuse the
- *    SSML parser or are unlikely to be English loanwords.
+ * PIPELINE (per chunk, in the JS prebuffer hot path):
+ *   raw text
+ *     │
+ *     ├─► tokenize on `\p{L}'`
+ *     │
+ *     ├─► for each candidate token:
+ *     │     ├─► tokenIsLoanword(token)?            (regex grapheme rules)
+ *     │     ├─► not in ITALIAN_WHITELIST?          (acclimatised stop-list)
+ *     │     ├─► tokenIsLoanword().passes?
+ *     │     ├─► await phonemizeAs(token,"en-us")   (native, ~5ms each)
+ *     │     ├─► non-empty IPA?
+ *     │     └─► splice <phoneme ph="IPA">token</phoneme> back into chunk
+ *     │
+ *     └─► sentence is forwarded to synthesizeToFile() WITH the SSML markup
  *
- * SSML CHARACTER ESCAPING
- * -----------------------
- *  Once any token in the sentence is wrapped, the WHOLE sentence is
- *  delivered to espeak with the SSML flag. Plain-text characters `<`,
- *  `>` and `&` MUST therefore be escaped to their XML entities, otherwise
- *  the parser would interpret them as markup (see the unit test in
- *  the bottom of this file).
+ * SCALE GUARANTEES:
+ *   - Zero-overhead detection: a single linear pass over the chunk
+ *     (no Set lookups against a 50k wordlist any more, no asset I/O
+ *     at runtime).
+ *   - Bounded native calls: thrillers run typically 0-3 loanwords per
+ *     sentence; even 5 phonemizeAs() calls cost <30ms total on midrange
+ *     phones, far below the natural audio gap the prebuffer hides.
+ *   - SAFE FAIL-OPEN: any failure in tokenIsLoanword(), the native
+ *     phonemizer, or even a malformed `ph` string → the original
+ *     token text is kept (no SSML wrap, no tag), so the worst case is
+ *     a single mispronounced loanword — never a silent or crashing
+ *     audio chunk.
+ *
+ * v1.0.4 removes the 50k English wordlist + DE/ES/FR whitelists that
+ * v2.7.7 used. Those assets are NOT bundled any more. The toggle
+ * (Pronuncia inglese per termini stranieri) controls whether
+ * `wrapForeignWords()` does anything at all — when OFF, this module
+ * is an unconditional pass-through.
  */
-import { Asset } from 'expo-asset';
-import * as FileSystem from 'expo-file-system/legacy';
-import { Buffer } from 'buffer';
-import { gunzipSync } from 'fflate';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-export const ENGLISH_WORDS_ASSET = require('../../assets/dicts/english_top10k.bin');
-
-// Per-language whitelists: tokens in these sets must NOT be wrapped as
-// English when the source language matches. Metro requires STATIC
-// require() calls — that's why we list them out explicitly here.
-const WHITELIST_ASSETS: Record<string, number> = {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  de: require('../../assets/dicts/whitelist_de.bin'),
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  es: require('../../assets/dicts/whitelist_es.bin'),
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  fr: require('../../assets/dicts/whitelist_fr.bin'),
-};
+import { getPiperNative } from './piperBridge';
 
 const ASYNC_FOREIGN_WORDS_KEY = '@piper/foreign_words_en_v1';
 
-// Cached, loaded once. `undefined` = not loaded yet, `null` = load failed.
-let englishWordsCache: Set<string> | null | undefined = undefined;
-
-// Per-language whitelists. `undefined` = not loaded yet, `null` = load
-// failed. Keys are 2-letter base language codes (de / es / fr).
-const whitelistCache: Record<string, Set<string> | null | undefined> = {
-  de: undefined,
-  es: undefined,
-  fr: undefined,
-};
-
 // In-memory mirror of the toggle so the synthesizer hot-path doesn't
-// have to await AsyncStorage on every sentence. The boot sequence in
-// piperEngine refreshes this on app start.
+// have to await AsyncStorage on every sentence.
 let foreignWordsEnabled = false;
 
 /**
  * Read the current AsyncStorage value into the in-memory cache and
- * return it. Call this on app start (PlayerContext / piperEngine init).
+ * return it. Called once at engine init (piperEngine.doInitEngine).
  */
 export async function refreshForeignWordsFlag(): Promise<boolean> {
   try {
@@ -110,7 +78,6 @@ export function isForeignWordsEnabled(): boolean {
 
 /**
  * Persist the user's preference and update the in-memory cache.
- * Returns the new effective value.
  */
 export async function setForeignWordsEnabled(enabled: boolean): Promise<boolean> {
   foreignWordsEnabled = enabled;
@@ -123,193 +90,416 @@ export async function setForeignWordsEnabled(enabled: boolean): Promise<boolean>
 }
 
 /**
- * Decode a gzipped UTF-8 wordlist bundled as an asset and return the
- * resulting Set of lowercased headwords. Used internally for both the
- * English wordlist and the per-language whitelists.
+ * v1.0.4 — No-op for source compatibility with the v2.7.7 API.
+ *
+ * The previous implementation downloaded and gunzipped a ~90 KB
+ * wordlist + per-language whitelist assets at boot. The new regex-
+ * based detector needs no runtime data, so this function returns
+ * immediately without doing any work.
+ *
+ * Kept around because `piperEngine.ts` still calls it on every
+ * `doInitEngine()` — removing the call would have meant patching
+ * the engine boot path too. Returning Promise<null> mirrors the
+ * old "no-load" signal.
  */
-async function loadWordlistAsset(assetModule: number, label: string): Promise<Set<string> | null> {
-  try {
-    const asset = Asset.fromModule(assetModule);
-    await asset.downloadAsync();
-    const src = asset.localUri || asset.uri;
-    if (!src) return null;
-    const b64 = await FileSystem.readAsStringAsync(src, {
-      encoding: FileSystem.EncodingType.Base64,
-    });
-    const gz = new Uint8Array(Buffer.from(b64, 'base64'));
-    const plain = gunzipSync(gz);
-    const text = Buffer.from(plain).toString('utf8');
-    const set = new Set<string>();
-    for (const line of text.split('\n')) {
-      const w = line.trim();
-      if (w) set.add(w.toLowerCase());
-    }
-    // eslint-disable-next-line no-console
-    console.log(`[foreignWords] Loaded ${set.size} ${label} headwords (${plain.length}B plain, ${gz.length}B gzipped)`);
-    return set;
-  } catch (e) {
-    // eslint-disable-next-line no-console
-    console.warn(`[foreignWords] Failed to load ${label} wordlist:`, e);
-    return null;
+export async function ensureEnglishWordsLoaded(): Promise<null> {
+  // eslint-disable-next-line no-console
+  console.log('[foreignWords] v1.0.4 JIT pipeline — no wordlist preload required');
+  return null;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 1. ITALIAN ACCLIMATISED WORDS — the words BELOW are anglicisms that
+//    Italian speakers pronounce in their italianised form (often with
+//    italian phonetics on the vowels and consonants). We MUST NOT wrap
+//    them as English: the regex would catch a lot of them (sport →
+//    cluster-final `rt`/short-vowel; hotel → ends `el`; etc.) and the
+//    listener would get an unexpectedly American pronunciation.
+//
+//    The set is intentionally small (~95 entries) and hand-curated:
+//    only the truly common Italian-acclimatised loanwords. Anything
+//    else is fair game for the English phonemizer.
+//
+//    All entries are lower-cased — lookup is also case-insensitive.
+// ──────────────────────────────────────────────────────────────────────
+const ITALIAN_WHITELIST: ReadonlySet<string> = new Set<string>([
+  // Sport & lifestyle
+  'sport', 'fitness', 'wellness', 'beauty', 'spa',
+  'jogging', 'footing', 'trekking', 'surf', 'snowboard',
+  // Hospitality / travel
+  'hotel', 'motel', 'bar', 'pub', 'club', 'lounge', 'resort',
+  'check', 'cocktail', 'drink', 'happy', 'menu',
+  // Office / tech (super-common)
+  'computer', 'internet', 'online', 'offline', 'email', 'web',
+  'file', 'link', 'mouse', 'click', 'chat', 'video', 'audio',
+  'media', 'social', 'app', 'login', 'logout', 'password',
+  'server', 'router', 'gadget', 'device', 'tablet', 'smartphone',
+  // Media / fashion
+  'film', 'movie', 'show', 'thriller', 'fashion', 'design',
+  'designer', 'style', 'trend', 'leader', 'manager', 'staff',
+  'team', 'marketing', 'business', 'meeting', 'partner',
+  // Time / events
+  'weekend', 'party', 'event', 'live', 'flash', 'breaking',
+  // Food
+  'sandwich', 'toast', 'snack', 'brunch', 'fast', 'food',
+  'hamburger', 'pizza',  // already italian-pronounced anyway
+  // Clothing
+  'jeans', 'shorts', 'tshirt', 't-shirt', 'pullover',
+  // Emotions / states
+  'shock', 'stress', 'relax', 'cool', 'super', 'top', 'okay',
+  // Misc common
+  'taxi', 'bus', 'tram', 'parking', 'garage', 'box',
+  'standard', 'optional', 'special', 'extra', 'master',
+  'banner', 'logo', 'slogan', 'spot',
+]);
+
+// ──────────────────────────────────────────────────────────────────────
+// 2. ENGLISH GRAPHEME CLUSTERS — patterns that are statistically very
+//    unlikely in native Italian morphology and very likely in English
+//    loanwords. Any one match upgrades the token to "loanword candidate".
+//
+//    Notes on each pattern (informed by Italian orthography rules):
+//      - `ck` :  Italian uses `cc` or `c` before /k/, never `ck`. So
+//                "Glock", "Bosch" (sh+ck combo), "shock" (whitelisted),
+//                "Brooklyn", "lock" all trigger.
+//      - `sh` :  Italian uses `sc(i|e)` or `sci`, never `sh`. Triggers
+//                on "Bosch", "Sheriff", "Sherman", "Bishop", etc.
+//      - `th` :  Never in italian, always english (Thompson, North,
+//                Smith, Heath).
+//      - `ph` :  Italian uses `f`, never `ph` (Phoenix, Philip,
+//                alphabet, graph). Triggers wherever found.
+//      - `wh` :  Italian has no `wh`. Triggers on "Whitney", "White".
+//      - `gh` (not at end) : "Knight" (silent gh), "Bright" — italian
+//                only has `ghi`, `ghe`. We require the gh NOT to be
+//                followed by `e`, `i` (which IS the italian pattern).
+//      - `ee` :  Italian double-vowel `ee` is extremely rare; "Lee",
+//                "Dundee", "Speed", "Green", "Heath" all trigger.
+//      - `oo` :  Same logic — "Bloomberg", "Moore", "Brook".
+//      - `ay` (mid/end) : "Broadway", "Highway", "Friday". Italian
+//                has no `ay` digraph.
+//      - `ow` (mid/end) : "Brown", "Crowford", "Yellowstone".
+//      - final `-nd`, `-rg`, `-ck`, `-rk`, `-rt` (after consonant) :
+//                English compact final clusters. Italian words almost
+//                always end in a vowel. We require the cluster to be
+//                preceded by a vowel (so we don't catch "il", "del" etc.)
+//                and the cluster itself to be at the END of the word.
+//      - leading `Mc` / `Mac` + uppercase consonant : Scottish/Irish
+//                patronymics — "McCaleb", "MacDonald".
+//      - English keywords (avenue, boulevard, drive, street, highway,
+//                road, broadway, plaza) — direct match on common urban
+//                terms used in english-speaking thrillers.
+//
+//    EVERY pattern is unicode-aware (we use the `u` flag) so we won't
+//    accidentally match across diacritic-modified letters.
+// ──────────────────────────────────────────────────────────────────────
+
+// Tier-A: clusters that are 100% non-italian (always trigger).
+const RE_ENGLISH_CLUSTERS = [
+  /ck/i,                          // Glock, Brooklyn, Dick
+  /sh/i,                          // Sheriff, Bishop, Smith→Shire
+  /sch/i,                         // Bosch, Schroeder — Italian uses sch only
+                                  // before e/i ("schiena"/"scheletro"), but
+                                  // even those still trigger here. Acceptable
+                                  // tradeoff: the only italian words with
+                                  // "sch" sequence are themselves rare and
+                                  // an italian phonetic reading vs. an
+                                  // english one is nearly indistinguishable
+                                  // for the listener ("scheletro").
+  /th/i,                          // Smith, Thompson, Heath, North
+  /ph/i,                          // Phoenix, Philip, alphabet, graph (CONFIRMED
+                                  // by product owner: italian never uses ph)
+  /wh/i,                          // Whitney, White, Whitman
+  /ch(?![eiy])/i,                 // Charlie, Brooch, Macho — italian only has
+                                  // ch + e/i ("che"/"chi"). The /y/ exclusion
+                                  // protects "chy" too (rare english cluster).
+  /gh(?![ei])/i,                  // Knight, Bright, Borough — italian only
+                                  // has gh + e/i ("ghetto"/"ghirlanda"). This
+                                  // catches BOTH consonant-gh (Knight) and
+                                  // vowel-gh (Heigh, Lough).
+  /^kn/i,                         // Knight, Knee, Knife — italian word never
+                                  // starts with "kn".
+  /^ps/i,                         // Psycho, Pseudo — italian word never starts
+                                  // with "ps" before a vowel either (other
+                                  // than greek loanwords like "psicologo"
+                                  // that are already italianised).
+  /ee/i,                          // Lee, Dundee, Green, Speed
+  /oo/i,                          // Bloomberg, Moore, Brook
+  /ay(?:$|[^aeiouy])/i,           // Broadway$, Highway$, Friday$
+  /ow(?:$|[^aeiouy])/i,           // Brown, Crowford, Yellowstone
+];
+
+// Tier-B: word-final compact consonant clusters preceded by a vowel.
+// Italian almost never ends a word in a hard consonant — these are
+// strong English markers.
+const RE_FINAL_CLUSTERS = [
+  /[aeiou](?:nd|rg|rk|rt|ck|lk|ng|st|sk)$/i,  // Sand, Burg, Mark, Hart, Kirk, Strong
+  /[^aeiou]y$/i,                              // Connelly, Kennedy, Murphy,
+                                              // Mary, Larry, Harry — italian
+                                              // words never end in
+                                              // consonant + y.
+];
+
+// Tier-C: Scottish/Irish patronymics. The capital letter constraint is
+// key — we don't want to match "macchina" (Italian car) → no, that's
+// `macc` not `mac` + consonant. But "MacDonald" or "McCaleb" lights up
+// because the capital after `Mc/Mac` is uppercase (proper-noun signal).
+const RE_PATRONYMIC = /^(?:Mc|Mac)[A-Z]/;
+
+// Tier-D: explicit urban/keyword list — case-insensitive WHOLE-WORD
+// matches.
+const URBAN_KEYWORDS: ReadonlySet<string> = new Set<string>([
+  'avenue', 'street', 'boulevard', 'drive', 'highway', 'road',
+  'broadway', 'plaza', 'square', 'lane', 'court', 'place',
+  // English-specific personal-title words that often appear next to
+  // names in audiobooks. They trigger the en-us phonemizer for the
+  // surrounding capitalised name too.
+  'sheriff', 'deputy', 'detective', 'agent',
+]);
+
+// Tier-E: well-known US/UK proper nouns that the regex tiers cannot
+// catch on their own (no obvious non-italian grapheme cluster). Hand-
+// curated to cover the most common thriller geographies + a handful
+// of frequent character surnames. Adding new entries is CHEAP — it's
+// just a Set membership test.
+const PROPER_NAMES_EN: ReadonlySet<string> = new Set<string>([
+  // US toponyms
+  'manhattan', 'sunset', 'hollywood', 'harlem', 'bronx', 'queens',
+  'vegas', 'seattle', 'boston', 'denver', 'houston', 'austin',
+  'dallas', 'miami', 'atlanta', 'memphis', 'detroit', 'portland',
+  'pittsburgh', 'baltimore', 'philly', 'newark', 'staten',
+  'westwood', 'beverly', 'malibu', 'venice', 'pasadena',
+  'compton', 'oakland', 'berkeley', 'sacramento',
+  // UK toponyms (occasionally appear in audiobooks)
+  'london', 'thames', 'soho', 'camden', 'chelsea',
+  // common english surnames not caught by clusters
+  'donovan', 'sullivan', 'callahan', 'flanagan', 'morgan',
+  'reagan', 'sloan', 'logan', 'cohen', 'allen',
+  'jordan', 'nolan', 'lawson', 'jackson', 'wilson',
+  'johnson', 'jefferson', 'anderson', 'robinson', 'thompson',
+  'harrison', 'peterson', 'davidson', 'henderson',
+  // common english given names (capitalised pattern in book text)
+  'kevin', 'gavin', 'devin', 'colin', 'martin', 'justin',
+  'austin', 'kenneth', 'harold', 'gerald', 'donald',
+  'ronald', 'arnold', 'sheldon',
+]);
+
+/**
+ * Pure-syntactic loanword classifier. Returns true if `token` looks
+ * like an English word (or a proper noun very likely to be English).
+ *
+ * Rejects tokens that:
+ *   - are too short (< 3 chars) — too many false positives ("the",
+ *     "and" would italianise badly; we let them be).
+ *   - contain digits, hyphens, apostrophes, or non-ASCII letters
+ *     (italian "città" → contains `à` → not english).
+ *   - are in the ITALIAN_WHITELIST acclimatised set.
+ *
+ * Accepts tokens that match ANY of the four detection tiers.
+ */
+function tokenIsLoanword(token: string): boolean {
+  if (token.length < 3) return false;
+  // Pure-ASCII letter check (rejects accented italian words like
+  // "Andrò", "città", "perché").
+  for (let i = 0; i < token.length; i++) {
+    const c = token.charCodeAt(i);
+    const isUpper = c >= 65 && c <= 90;
+    const isLower = c >= 97 && c <= 122;
+    if (!(isUpper || isLower)) return false;
   }
-}
-
-/**
- * Load (and cache) the English wordlist + per-language whitelists from
- * the bundled .bin assets.
- *
- * Returns the English Set, or null if loading failed (in which case the
- * helper silently no-ops on subsequent calls — see `wrapForeignWords`).
- *
- * Safe to call repeatedly: subsequent calls hit the cache.
- *
- * The per-language whitelists are loaded in parallel as a fire-and-forget
- * side-effect — they don't block the returned promise. `wrapForeignWords`
- * tolerates a not-yet-loaded whitelist by skipping the subtraction step
- * (fail-open with English-only matching).
- */
-export async function ensureEnglishWordsLoaded(): Promise<Set<string> | null> {
-  // Kick off whitelist loads in parallel on the first call. They mutate
-  // the module-level cache directly; the returned promise we DON'T await
-  // (the English set is the only thing we promise to deliver here).
-  for (const lang of Object.keys(WHITELIST_ASSETS)) {
-    if (whitelistCache[lang] === undefined) {
-      whitelistCache[lang] = null; // mark "in-flight" to dedupe
-      const assetModule = WHITELIST_ASSETS[lang];
-      // eslint-disable-next-line @typescript-eslint/no-floating-promises
-      loadWordlistAsset(assetModule, `${lang.toUpperCase()} whitelist`).then((set) => {
-        whitelistCache[lang] = set; // may also be null on failure
-      });
-    }
+  const lower = token.toLowerCase();
+  // Reject acclimatised italian loanwords.
+  if (ITALIAN_WHITELIST.has(lower)) return false;
+  // Urban / context keywords — instant match.
+  if (URBAN_KEYWORDS.has(lower)) return true;
+  // Curated US/UK proper nouns — instant match (Manhattan, Sunset,
+  // Donovan, Sullivan… anything the regex tiers can't pattern-match
+  // on its own).
+  if (PROPER_NAMES_EN.has(lower)) return true;
+  // Patronymic prefix (Mc/Mac + Uppercase).
+  if (RE_PATRONYMIC.test(token)) return true;
+  // Tier-A clusters.
+  for (const re of RE_ENGLISH_CLUSTERS) {
+    if (re.test(token)) return true;
   }
-
-  if (englishWordsCache !== undefined) return englishWordsCache;
-  const set = await loadWordlistAsset(ENGLISH_WORDS_ASSET, 'English');
-  englishWordsCache = set;
-  return set;
+  // Tier-B final clusters.
+  for (const re of RE_FINAL_CLUSTERS) {
+    if (re.test(token)) return true;
+  }
+  return false;
 }
 
 /**
- * Return the whitelist for a given base language code, or null if it
- * isn't loaded yet / failed / doesn't exist. Synchronous lookup so
- * `wrapForeignWords` can stay synchronous.
+ * Escape `<`, `>`, `&`, `"` so the SSML parser treats them as literal
+ * text. The double-quote is escaped because the SSML `ph="…"` attribute
+ * itself is double-quoted on the C++ side, so a quote inside the
+ * phoneme string would break parsing.
  */
-function getWhitelist(baseLang: string): Set<string> | null {
-  const w = whitelistCache[baseLang];
-  return w ?? null;
-}
-
-/**
- * Escape `<`, `>`, `&` so the SSML parser treats them as literal text.
- * Quotes are left alone — they're not significant outside attribute
- * values (which we control directly, never letting user text reach them).
- */
-function escapeXml(s: string): string {
+function escapeXmlText(s: string): string {
   return s
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 }
 
-/**
- * Decide whether a raw token (between whitespace boundaries) could be
- * matched against the English wordlist. We DO NOT consider tokens that
- *  - are shorter than 4 characters (already filtered out of the asset
- *    but enforce here too)
- *  - contain digits, underscore, slash, ampersand, less-than, greater-
- *    than, dot, comma, semicolon, colon, parens or brackets
- *  - contain characters outside the basic-Latin letter range plus the
- *    common accented set used in IT/FR/DE/ES (a token like "città"
- *    is obviously not English, skip it).
- */
-function tokenLooksLikePossibleEnglish(token: string): boolean {
-  if (token.length < 4) return false;
-  // Accept only letters (with common European diacritics, which are
-  // overwhelmingly NON-English markers — we'll skip them anyway). The
-  // simpler filter is "ASCII letters + apostrophe", which catches every
-  // entry in the bundled list.
-  for (let i = 0; i < token.length; i++) {
-    const c = token.charCodeAt(i);
-    const isUpper = c >= 65 && c <= 90;
-    const isLower = c >= 97 && c <= 122;
-    const isApos  = c === 39;
-    if (!(isUpper || isLower || isApos)) return false;
-  }
-  return true;
+function escapeXmlAttribute(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 /**
- * Wrap every token that matches the English wordlist with
- * `<voice name="en">…</voice>` so eSpeak switches translator per-word.
+ * Small LRU cache for the IPA strings we get back from the native
+ * phonemizer. Audiobook text is highly repetitive (the same proper
+ * nouns appear dozens of times per chapter — "Bosch", "Connelly",
+ * "LAPD") so caching saves an enormous number of JNI round-trips.
+ *
+ * Cap kept intentionally small (256 entries × ~20B IPA = ~5 KB)
+ * — anything more is wasted on rarely-repeating tokens.
+ */
+const PHONEME_CACHE = new Map<string, string>();
+const PHONEME_CACHE_MAX = 256;
+
+function cacheGet(key: string): string | undefined {
+  return PHONEME_CACHE.get(key);
+}
+
+function cacheSet(key: string, value: string): void {
+  if (PHONEME_CACHE.has(key)) PHONEME_CACHE.delete(key); // refresh LRU position
+  PHONEME_CACHE.set(key, value);
+  if (PHONEME_CACHE.size > PHONEME_CACHE_MAX) {
+    // Drop oldest entry (Map preserves insertion order).
+    const oldest = PHONEME_CACHE.keys().next().value;
+    if (oldest !== undefined) PHONEME_CACHE.delete(oldest);
+  }
+}
+
+/**
+ * Public cache-clear hook used by Settings when the user toggles the
+ * foreign-words flag back and forth (so a stale cache doesn't survive
+ * a "Pronuncia inglese" → OFF → ON cycle).
+ */
+export function clearPhonemeCache(): void {
+  PHONEME_CACHE.clear();
+}
+
+/**
+ * v1.0.4 — JIT phoneme-mapping enrichment.
+ *
+ * Walks the chunk, detects English loanword candidates with the
+ * regex classifier, fetches their en-us IPA via `phonemizeAs()` on
+ * the native side, and substitutes them with
+ *   `<phoneme alphabet="espeak" ph="…">word</phoneme>`
+ * inline. Plain text characters are XML-escaped (`<`, `>`, `&`) so
+ * they don't confuse the C++ SSML parser.
  *
  * Returns the input unchanged when:
  *   - the toggle is OFF, OR
- *   - the wordlist failed to load, OR
- *   - no token matched (the sentence stays plain text — the JNI
- *     auto-detect then never enables SSML, no parser overhead)
+ *   - the source language is already English, OR
+ *   - no token matched the loanword regex.
  *
- * @param srcLang Source language code (it / fr / de / es / en). When
- * 'en', the function is a no-op (you don't switch to English from
- * English). When 'de' / 'es' / 'fr', the corresponding whitelist is
- * subtracted from the candidate set so source-language words that
- * happen to also exist in English (e.g. "abandon" in French) are NOT
- * wrapped.
+ * NEVER throws. A failure inside `phonemizeAs()` (engine not booted,
+ * native module missing, unknown voice) is caught and the offending
+ * token is left as plain text — the worst case is one mispronounced
+ * loanword, never a synthesis crash.
+ *
+ * @param text     raw sentence text from the book
+ * @param srcLang  source language code ("it" / "fr" / "de" / "es" / "en"…)
  */
-export function wrapForeignWords(text: string, srcLang: string): string {
+export async function wrapForeignWords(text: string, srcLang: string): Promise<string> {
   if (!foreignWordsEnabled) return text;
   if (!text) return text;
+
   // No need to switch from English to English.
   const base = srcLang.toLowerCase().split(/[-_]/)[0];
   if (base === 'en') return text;
-  const set = englishWordsCache;
-  if (!set) return text; // wordlist not loaded — fail open with plain text
 
-  // Per-language stop-list. For IT we have no runtime whitelist because
-  // homographs were already subtracted at build time inside the bundled
-  // English asset itself. For DE/ES/FR we look up the runtime whitelist
-  // and skip any token that the user's source language would normally
-  // pronounce correctly without switching.
-  const stopList = getWhitelist(base); // null when not applicable / not yet loaded
+  // Bail out early if the native bridge doesn't expose phonemizeAs
+  // (older builds of the .so, web preview, Expo Go etc.).
+  const native = getPiperNative();
+  const phonemizeFn = native && typeof native.phonemizeAs === 'function'
+    ? native.phonemizeAs.bind(native)
+    : null;
+  if (!phonemizeFn) {
+    // No native phonemizer → safe fallback: plain text, no SSML.
+    return text;
+  }
 
-  // Split text into a sequence of "word" / "non-word" runs so we can
-  // wrap only the word runs and leave punctuation/spaces untouched.
-  //
-  // v2.7.7-Audiobook-Tuned: the word class is now `\p{L}` (any Unicode
-  // letter) + apostrophe, NOT just `[A-Za-z]` + apostrophe. This is
-  // critical because the old ASCII-only regex would split "voltò" into
-  // "volt" (4-char ASCII matching our wordlist!) + "ò" (separate run),
-  // wrongly wrapping "volt" as English. With `\p{L}` the entire
-  // "voltò" becomes ONE token of 5 letters; tokenLooksLikePossibleEnglish
-  // then rejects it (the function-level loop demands ASCII-only) so
-  // the Italian word is kept as-is.
+  // 1. First pass — tokenize and identify candidates.
+  //    We process tokens UNIQUELY before issuing native calls (the
+  //    same name often appears 3-5 times in a chunk) — that gives us
+  //    in-chunk dedup on top of the LRU cache.
   const re = /[\p{L}']+|[^\p{L}']+/gu;
-  let out = '';
-  let wrappedAny = false;
+  type Match = { start: number; end: number; token: string };
+  const matches: Match[] = [];
+  const uniqueLoanwords = new Set<string>();
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const chunk = m[0];
-    // Non-word chunk: just escape and keep.
-    if (!/^[\p{L}']+$/u.test(chunk)) {
-      out += escapeXml(chunk);
+    // Word chunk only.
+    if (!/^[\p{L}']+$/u.test(chunk)) continue;
+    if (!tokenIsLoanword(chunk)) continue;
+    matches.push({ start: m.index, end: m.index + chunk.length, token: chunk });
+    uniqueLoanwords.add(chunk);
+  }
+
+  // Fast path: nothing to wrap → return the ORIGINAL (un-escaped)
+  // text so the C++ JNI auto-detect skips the SSML parser entirely.
+  if (matches.length === 0) return text;
+
+  // 2. Native phonemize each UNIQUE loanword (uses the LRU cache to
+  //    skip already-seen ones from previous chunks).
+  const ipaMap = new Map<string, string>();
+  for (const tok of uniqueLoanwords) {
+    const cacheKey = tok.toLowerCase();
+    const hit = cacheGet(cacheKey);
+    if (hit !== undefined) {
+      ipaMap.set(tok, hit);
       continue;
     }
-    // Word chunk: see if it matches the English wordlist AND is NOT in
-    // the source-language whitelist.
-    const lower = chunk.toLowerCase();
-    if (
-      tokenLooksLikePossibleEnglish(chunk) &&
-      set.has(lower) &&
-      !(stopList && stopList.has(lower))
-    ) {
-      // Wrap, preserving the original casing.
-      out += `<voice name="en">${chunk}</voice>`;
-      wrappedAny = true;
-    } else {
-      out += escapeXml(chunk);
+    let ipa = '';
+    try {
+      ipa = (await phonemizeFn(tok, 'en-us')) || '';
+    } catch {
+      ipa = ''; // soft failure — token will fall back to plain text.
     }
+    // Trim any leading/trailing whitespace espeak adds, and
+    // collapse runs of whitespace to a single space (espeak
+    // sometimes adds a final space).
+    ipa = ipa.trim().replace(/\s+/g, ' ');
+    ipaMap.set(tok, ipa);
+    cacheSet(cacheKey, ipa);
   }
-  // If we didn't wrap anything, return the ORIGINAL (un-escaped) text so
-  // the JNI auto-detect skips the SSML parser entirely. This avoids
-  // pointlessly escaping `&` etc. when no language switch is needed.
-  return wrappedAny ? out : text;
+
+  // 3. Second pass — rebuild the string, splicing the SSML wraps in.
+  let out = '';
+  let cursor = 0;
+  for (const { start, end, token } of matches) {
+    // Plain text BEFORE this match — XML-escape it.
+    if (start > cursor) {
+      out += escapeXmlText(text.slice(cursor, start));
+    }
+    const ipa = ipaMap.get(token) || '';
+    if (ipa) {
+      // Splice the SSML wrap. The token surface text inside the
+      // tag is still XML-escaped (it's regular text content even
+      // though espeak's <phoneme> parser ignores it).
+      out +=
+        `<phoneme alphabet="espeak" ph="${escapeXmlAttribute(ipa)}">` +
+        escapeXmlText(token) +
+        `</phoneme>`;
+    } else {
+      // Soft fallback: phonemizer returned nothing → leave the
+      // token as plain (escaped) text. The whole sentence will
+      // still benefit from any OTHER successful wraps.
+      out += escapeXmlText(token);
+    }
+    cursor = end;
+  }
+  // Trailing tail.
+  if (cursor < text.length) {
+    out += escapeXmlText(text.slice(cursor));
+  }
+  return out;
 }

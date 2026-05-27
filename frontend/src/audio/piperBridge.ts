@@ -47,6 +47,22 @@ export type PiperNative = {
   deleteWavFile: (path: string) => Promise<boolean>;
   /** Nuke the whole WAV cache directory. */
   cleanupWavCache: () => Promise<number>;
+  /**
+   * v1.0.4 — JIT phonemize with an arbitrary espeak voice.
+   *
+   * Returns the IPA stream produced by espeak when `voice` is active
+   * (typically "en-us" for English loanwords). The previous voice is
+   * restored before this promise resolves, so it is SAFE to call from
+   * the prebuffer hot path without disturbing subsequent
+   * synthesizeToFile() calls.
+   *
+   * Resolves with "" on any failure — the JS caller MUST tolerate
+   * the empty string by falling back to plain-text output (no SSML
+   * wrap). Optional: only present on builds with the v1.0.4+ native
+   * bridge — older .so binaries simply won't expose it, in which
+   * case JS calls go straight to the fallback path.
+   */
+  phonemizeAs?: (text: string, voice: string) => Promise<string>;
   // Legacy compatibility shims
   initializeTTS?: (sr: number, ch: number, configJson: string) => Promise<unknown>;
   deinitialize?: () => Promise<unknown>;

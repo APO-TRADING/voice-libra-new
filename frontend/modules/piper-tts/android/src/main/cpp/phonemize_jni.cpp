@@ -3,10 +3,11 @@
 // Thin C++ JNI bridge over espeak-ng for the Piper TTS pipeline.
 //
 // Public Kotlin API:
-//   PhonemizerNative.nativeInit(dataPath)            -> 0=OK, <0=err
-//   PhonemizerNative.nativeSetVoice(voiceName)       -> 0=OK, <0=err
-//   PhonemizerNative.nativePhonemize(text, asIpa)    -> String of phonemes
-//   PhonemizerNative.nativeTerminate()               -> 0=OK
+//   PhonemizerNative.nativeInit(dataPath)              -> 0=OK, <0=err
+//   PhonemizerNative.nativeSetVoice(voiceName)         -> 0=OK, <0=err
+//   PhonemizerNative.nativePhonemize(text, asIpa)      -> String of phonemes
+//   PhonemizerNative.nativePhonemizeAs(text, voice)    -> String of phonemes (JIT 1.0.4)
+//   PhonemizerNative.nativeTerminate()                 -> 0=OK
 //
 // We use the official espeak-ng C API:
 //   - espeak_Initialize(AUDIO_OUTPUT_SYNCHRONOUS, ...) we never play audio
@@ -64,16 +65,14 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativeInit(
     return 0;
   }
   std::string dataPath = jstringToString(env, jDataPath);
-  // v2.7.7 build fingerprint — grep this in adb logcat to verify the
+  // v1.0.4 build fingerprint — grep this in adb logcat to verify the
   // running .so was compiled FROM this source revision (and not from
   // a stale EAS cache layer). If you don't see it, the cached build
   // is being used and the SSML auto-detect patch may not be present.
-  // FORCE-FORCE marker (after first FORCE-FORCE build was still stale
-  // due to uncommitted-files-on-EAS issue): if you grep this exact
-  // string and see it, then the .so is the one with the SSML auto-
-  // detect logic + the isNotBlank canary guard. If you don't, you
-  // are running an older binary.
-  LOGI("nativeInit: dataPath=%s build=v2.7.7-SSML-PARSE-MANUAL", dataPath.c_str());
+  // v1.0.4 marker confirms the JIT Phoneme-Mapping pipeline is live:
+  // <phoneme alphabet="espeak" ph="…">word</phoneme> is supported and
+  // the new nativePhonemizeAs() JNI entrypoint is exposed.
+  LOGI("nativeInit: dataPath=%s build=v1.0.4-JIT-PHONEME-MAPPING", dataPath.c_str());
 
   // AUDIO_OUTPUT_RETRIEVAL means we won't actually output audio — we only
   // need espeak to compute phonemes. Buffer length is in ms (zero means
@@ -167,6 +166,8 @@ static std::string decodeXmlEntities(const std::string& s) {
       if (s.compare(i, 4, "&lt;") == 0)   { out += '<'; i += 4; continue; }
       if (s.compare(i, 4, "&gt;") == 0)   { out += '>'; i += 4; continue; }
       if (s.compare(i, 5, "&amp;") == 0)  { out += '&'; i += 5; continue; }
+      if (s.compare(i, 6, "&quot;") == 0) { out += '"'; i += 6; continue; }
+      if (s.compare(i, 6, "&apos;") == 0) { out += '\''; i += 6; continue; }
     }
     out += s[i++];
   }
@@ -181,34 +182,26 @@ static std::string decodeXmlEntities(const std::string& s) {
 // drive the model's prosody, intonation, and pause timing). The exact
 // algorithm matches rhasspy/piper-phonemize's phonemize_eSpeak().
 //
-// v2.7.7-FINAL-FORCE — PROPER per-segment SSML switch.
+// v1.0.4-JIT-PHONEME-MAPPING — the parser now ALSO recognizes the SSML
+// tag <phoneme alphabet="espeak" ph="…">word</phoneme> emitted by the
+// JS JIT pre-processor (see frontend/src/audio/foreignWords.ts). When
+// found, the contents of `ph` are written DIRECTLY into the output
+// phoneme stream (no espeak voice switch), and the word's surface text
+// is dropped. This eliminates the stop-and-start artifacts caused by
+// per-loanword <voice name="en"> switches in v2.7.7. The legacy
+// <voice>…</voice> path is kept for backwards compatibility and as a
+// safety-net fallback (zero runtime cost when not used).
 //
-// WHY THE PREVIOUS DESIGN FAILED:
-//   espeak_TextToPhonemesWithTerminator() does NOT honor the espeakSSML
-//   bit in textmode. Only espeak_Synth() (the full audio path) sets
-//   `option_ssml` internally — see src/libespeak-ng/speech.c lines
-//   ~435 (Synthesize sets it) vs ~860 (TextToPhonemes does NOT). So
-//   passing espeakCHARS_UTF8 | espeakSSML was a no-op: the SSML
-//   markup got fed to the Italian translator and produced
-//   "vˈɔitʃe nˈame ʊɡwˈale ˈɛn ˈiks bˈarɾa vˈɔitʃe" instead of
-//   the desired "ˈɛks" for `<voice name="en">x</voice>`.
-//
-// WHAT WE DO INSTEAD:
-//   We parse the SSML markup OURSELVES at the JNI layer. The input is
-//   sliced into segments at every `<voice name="LANG">…</voice>`
-//   boundary. For each segment we (a) optionally call
-//   espeak_SetVoiceByName(LANG) to switch translator, (b) phonemize
-//   the segment with the regular plain-text path, (c) at the end
-//   restore the original voice. Three benefits over the broken flag
-//   approach:
-//     - works with the EXISTING espeak_TextToPhonemes API (no need to
-//       expose internal `option_ssml`)
-//     - the voice switch is RECORDED in the same way nativeSetVoice
-//       does it, so subsequent unrelated calls continue to use the
-//       intended voice
-//     - cheap: at most one extra SetVoiceByName per loanword (and we
-//       cache the active voice so consecutive same-language segments
-//       skip the redundant call)
+// WHY THIS ARCHITECTURE WINS:
+//   With the JIT JS pipeline pre-computing the English phonemes for
+//   each foreign word, we feed espeak ONE continuous Italian sentence
+//   that *already contains* English phonemes baked-in for the target
+//   words. espeak makes a SINGLE prosody pass over the text — no
+//   voice resets, no clause boundary disruptions inside loanwords —
+//   so Piper VITS receives a smooth, italian-prosodic stream that
+//   merely happens to contain English-phonetic islands. The audio
+//   the user hears is one continuous Italian sentence with naturally
+//   pronounced English loanwords inside it.
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
     JNIEnv* env, jclass, jstring jText) {
@@ -220,22 +213,24 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
   std::string text = jstringToString(env, jText);
   if (text.empty()) return env->NewStringUTF("");
 
-  // Fast path: no SSML markup → just phonemize as-is. This is the
-  // ~99% case (toggle OFF, or src lang is `en`, or no loanword
+  // Fast path: no SSML markup at all → just phonemize as-is. This is
+  // the ~99% case (toggle OFF, or src lang is `en`, or no loanword
   // matched).
-  if (text.find("<voice ") == std::string::npos) {
+  const bool hasVoiceTag   = (text.find("<voice ")   != std::string::npos);
+  const bool hasPhonemeTag = (text.find("<phoneme ") != std::string::npos);
+  if (!hasVoiceTag && !hasPhonemeTag) {
     std::string out = phonemizePlainSegment(decodeXmlEntities(text));
     return env->NewStringUTF(out.c_str());
   }
 
-  // SSML path. We expect the JS pre-processor to emit tags of EXACTLY
-  // this shape: `<voice name="LANG">INNER</voice>`, where LANG is a
-  // bare ISO code recognized by espeak (e.g. "en"). The JS layer
-  // guarantees the markup is well-formed (no nesting, balanced tags,
-  // no leading whitespace inside the open tag). We still defend
-  // against malformed input by skipping any tag we can't parse.
-  LOGI("nativePhonemize: SSML pipeline engaged, len=%zu, baseVoice=%s",
-       text.size(), g_currentVoice.c_str());
+  // SSML path. The JS pre-processor (foreignWords.ts) emits either of:
+  //   • `<voice name="LANG">INNER</voice>` (legacy v2.7.7, fallback)
+  //   • `<phoneme alphabet="espeak" ph="PHONEMES">WORD</phoneme>` (JIT v1.0.4)
+  // Both are well-formed (no nesting, balanced tags, no whitespace
+  // inside the open tag). We still defend against malformed input by
+  // skipping any tag we can't parse.
+  LOGI("nativePhonemize: SSML pipeline engaged, len=%zu, baseVoice=%s, hasVoiceTag=%d, hasPhonemeTag=%d",
+       text.size(), g_currentVoice.c_str(), (int)hasVoiceTag, (int)hasPhonemeTag);
 
   const std::string baseVoice = g_currentVoice;  // remember so we can restore
   std::string activeVoice     = baseVoice;       // mirror espeak's actual state
@@ -243,13 +238,18 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
   size_t pos = 0;
 
   while (pos < text.size()) {
-    size_t openTag = text.find("<voice ", pos);
+    // Find the NEXT SSML opener — whichever comes first between
+    // `<voice ` and `<phoneme `.
+    size_t openVoice   = text.find("<voice ",   pos);
+    size_t openPhoneme = text.find("<phoneme ", pos);
+    size_t openTag     = std::min(openVoice, openPhoneme);
+    bool isPhoneme = (openTag == openPhoneme && openPhoneme != std::string::npos);
 
     // --- Outer (no-switch) segment: from pos up to openTag (or end). ---
     size_t outerEnd = (openTag == std::string::npos) ? text.size() : openTag;
     if (outerEnd > pos) {
       // Restore the base voice if we drifted away in the previous loop.
-      if (activeVoice != baseVoice) {
+      if (activeVoice != baseVoice && !baseVoice.empty()) {
         espeak_SetVoiceByName(baseVoice.c_str());
         activeVoice = baseVoice;
       }
@@ -258,7 +258,57 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
     }
     if (openTag == std::string::npos) break;
 
-    // --- Parse the open tag: `<voice name="LANG">` ---
+    if (isPhoneme) {
+      // ---------------------------------------------------------------
+      // <phoneme alphabet="espeak" ph="PHONEMES">word</phoneme>
+      //
+      // We inject PHONEMES directly into the output stream WITHOUT any
+      // espeak voice switch. This is the v1.0.4 JIT pipeline: the JS
+      // layer already pre-computed the English IPA via the dedicated
+      // nativePhonemizeAs() entrypoint, so all we need to do here is
+      // splice the result in. The current espeak voice stays untouched
+      // for the entire sentence → no clause-boundary disruptions.
+      //
+      // Robust attribute parsing: accept the `ph` attribute in EITHER
+      // order (ph="…" alphabet="espeak", OR alphabet="espeak" ph="…").
+      // ---------------------------------------------------------------
+      size_t phStart = text.find("ph=\"", openTag);
+      if (phStart == std::string::npos || phStart > openTag + 64) {
+        pos = openTag + 9;  // skip "<phoneme " and resync
+        continue;
+      }
+      phStart += 4;
+      size_t phEnd = text.find('"', phStart);
+      if (phEnd == std::string::npos) { pos = openTag + 9; continue; }
+      std::string phStr = decodeXmlEntities(text.substr(phStart, phEnd - phStart));
+
+      size_t openEnd = text.find('>', phEnd);
+      if (openEnd == std::string::npos) { pos = openTag + 9; continue; }
+      size_t closeTag = text.find("</phoneme>", openEnd);
+      if (closeTag == std::string::npos) closeTag = text.size();
+
+      // Insert the pre-computed phonemes. Pad with a single space on
+      // each side so the espeak prosody on the next plain segment
+      // treats the injection as a separate word, preserving stress
+      // boundaries between IT phonemes and EN phonemes.
+      if (!phStr.empty()) {
+        if (!result.empty() && result.back() != ' ') result.push_back(' ');
+        result += phStr;
+        result.push_back(' ');
+      }
+
+      pos = (closeTag == text.size()) ? text.size() : (closeTag + 10);  // strlen("</phoneme>") == 10
+      continue;
+    }
+
+    // ---------------------------------------------------------------
+    // <voice name="LANG">INNER</voice>  (legacy v2.7.7 path)
+    //
+    // Kept for backwards compat & fallback testing only — the new JIT
+    // pipeline doesn't emit this tag anymore. Per-segment voice switch:
+    // costly (full espeak translator reset) and source of the audible
+    // micro-stops the v1.0.4 refactor was designed to eliminate.
+    // ---------------------------------------------------------------
     size_t nameStart = text.find("name=\"", openTag);
     if (nameStart == std::string::npos || nameStart > openTag + 32) {
       pos = openTag + 7;  // skip "<voice " and resync
@@ -299,6 +349,73 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
     espeak_SetVoiceByName(baseVoice.c_str());
   }
   return env->NewStringUTF(result.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// v1.0.4 — JIT phonemize entrypoint.
+//
+// Phonemize the given text WITH AN ARBITRARY VOICE (typically "en-us"
+// for English loanwords) and RESTORE the previously-set voice on exit.
+//
+// This is the bridge the JS layer uses to pre-compute the IPA string
+// for each foreign word BEFORE wrapping it in `<phoneme ph="…">…
+// </phoneme>` SSML. Crucially, it does NOT alter g_currentVoice — the
+// caller's view of "which voice is set" stays intact, because the
+// voice switch is reverted before this function returns.
+//
+// Threading: takes the SAME mutex as nativePhonemize() / nativeSetVoice(),
+// so even concurrent calls from JS will serialize correctly. In practice
+// the JS pre-buffer pipeline calls this 0-5 times per chunk on the same
+// background thread, so contention is non-existent.
+//
+// Edge cases:
+//   - g_initialized==false   → returns "" (caller falls back to plain text)
+//   - voice empty/unknown    → returns "" (espeak SetVoiceByName fails)
+//   - text empty             → returns "" (no work to do)
+//   - espeak voice restore   → best-effort; if it fails we log but still
+//     return the phonemes (caller's next nativePhonemize() will retry)
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemizeAs(
+    JNIEnv* env, jclass, jstring jText, jstring jVoice) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (!g_initialized) {
+    LOGE("nativePhonemizeAs called before nativeInit");
+    return env->NewStringUTF("");
+  }
+  std::string text  = jstringToString(env, jText);
+  std::string voice = jstringToString(env, jVoice);
+  if (text.empty() || voice.empty()) return env->NewStringUTF("");
+
+  const std::string baseVoice = g_currentVoice;
+  // Switch to the requested voice.
+  espeak_ERROR err = espeak_SetVoiceByName(voice.c_str());
+  if (err != EE_OK) {
+    LOGE("nativePhonemizeAs: SetVoiceByName(%s) failed err=%d", voice.c_str(), err);
+    // No-op restore needed since the switch failed.
+    return env->NewStringUTF("");
+  }
+
+  // Phonemize the (already-decoded — no XML expected here) text.
+  std::string out = phonemizePlainSegment(text);
+
+  // Best-effort restore of the user-set voice. If it fails we log
+  // and keep going; subsequent nativePhonemize() calls will re-set
+  // the voice on the first <voice> segment they encounter, and the
+  // outer Kotlin code re-issues SetVoiceByName at every loadVoice().
+  if (!baseVoice.empty()) {
+    espeak_ERROR restoreErr = espeak_SetVoiceByName(baseVoice.c_str());
+    if (restoreErr != EE_OK) {
+      LOGE("nativePhonemizeAs: restore SetVoiceByName(%s) failed err=%d",
+           baseVoice.c_str(), restoreErr);
+    }
+  }
+
+  LOGI("nativePhonemizeAs: voice=%s text=\"%.*s\" -> ipa=\"%s\" (%zuB)",
+       voice.c_str(),
+       (int)std::min<size_t>(text.size(), 40), text.c_str(),
+       out.c_str(), out.size());
+  return env->NewStringUTF(out.c_str());
 }
 
 extern "C" JNIEXPORT jint JNICALL
