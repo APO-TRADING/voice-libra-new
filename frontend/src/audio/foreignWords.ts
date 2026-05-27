@@ -5,33 +5,37 @@
  *
  * USAGE
  * -----
- *  1. JS pre-loads the English wordlist once at app start
- *     (`ensureEnglishWordsLoaded()`).
+ *  1. JS pre-loads the English wordlist + per-language whitelists once
+ *     at app start (`ensureEnglishWordsLoaded()`).
  *  2. Before sending each sentence to the native TTS, JS calls
  *     `wrapForeignWords(sentence, srcLang)`. If the toggle in
  *     Settings ("Pronuncia inglese per termini stranieri") is OFF, the
  *     helper just returns the plain text unchanged. If ON, every token
  *     matching the bundled English wordlist (after Italian/IT-homograph
- *     subtraction) is wrapped in `<voice name="en">…</voice>`. The
- *     native JNI auto-detects the SSML markup and OR-s `espeakSSML`
- *     into the espeak textmode, so the phonemizer switches its
- *     internal language translator per-word.
+ *     subtraction AND after subtracting the source-language whitelist)
+ *     is wrapped in `<voice name="en">…</voice>`. The native JNI
+ *     auto-detects the SSML markup and OR-s `espeakSSML` into the
+ *     espeak textmode, so the phonemizer switches its internal
+ *     language translator per-word.
  *
  * DESIGN NOTES
  * ------------
- *  - The bundled wordlist is gzipped UTF-8 text, ~25 KB on disk. After
- *    gunzip it expands to ~80 KB plain. The resulting Set<string>
- *    holds 8 759 lowercased English headwords.
- *  - We use the SAME lookup for it / fr / de / es — the assumption is
- *    that any "true English" word found inside a Latin-script European
- *    audiobook (Manhattan, Brooklyn, dashboard, microservice, etc.)
- *    must be pronounced in English regardless of the surrounding text.
- *  - The wordlist EXCLUDES (by construction):
- *      • acclimated loanwords already in IT (test, computer, internet,
- *        weekend, manager, sport, hobby, top, video, …) — leaving these
- *        to the native language phonemizer
- *      • Italian homographs (come, dove, sopra, sotto, anche, vita,
- *        casa, mano, tutto, …)
+ *  - The bundled English wordlist is gzipped UTF-8 text, ~90 KB on
+ *    disk. After gunzip it expands to ~300 KB plain. The resulting
+ *    Set<string> holds ~32 000 lowercased English headwords
+ *    (Audiobook-Tuned: includes author/brand surnames like Connelly,
+ *    Bosch, Tupperware, etc.).
+ *  - Italian homographs are EXCLUDED at build time inside the bundled
+ *    asset itself. So when `srcLang === 'it'`, the English wordlist
+ *    alone is enough — no extra whitelist is loaded for Italian.
+ *  - For DE / ES / FR audiobooks, we ship per-language whitelists
+ *    (`whitelist_<lang>.bin`, ~1.4k-2.4k entries each) listing common
+ *    headwords in that language that happen to also appear in the
+ *    English dictionary (e.g. "abandon" is both English and French —
+ *    we MUST NOT wrap it as English in a French audiobook). When
+ *    `wrapForeignWords()` is called for one of those languages it
+ *    subtracts the whitelist from the candidate set, so the source
+ *    language's natural pronunciation is preserved.
  *  - Lookup is case-insensitive (we lowercase the token before the Set
  *    check). The original casing is preserved in the SSML output.
  *  - We DO NOT wrap tokens that contain digits, apostrophes mid-word
@@ -55,10 +59,30 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 export const ENGLISH_WORDS_ASSET = require('../../assets/dicts/english_top10k.bin');
 
+// Per-language whitelists: tokens in these sets must NOT be wrapped as
+// English when the source language matches. Metro requires STATIC
+// require() calls — that's why we list them out explicitly here.
+const WHITELIST_ASSETS: Record<string, number> = {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  de: require('../../assets/dicts/whitelist_de.bin'),
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  es: require('../../assets/dicts/whitelist_es.bin'),
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  fr: require('../../assets/dicts/whitelist_fr.bin'),
+};
+
 const ASYNC_FOREIGN_WORDS_KEY = '@piper/foreign_words_en_v1';
 
 // Cached, loaded once. `undefined` = not loaded yet, `null` = load failed.
 let englishWordsCache: Set<string> | null | undefined = undefined;
+
+// Per-language whitelists. `undefined` = not loaded yet, `null` = load
+// failed. Keys are 2-letter base language codes (de / es / fr).
+const whitelistCache: Record<string, Set<string> | null | undefined> = {
+  de: undefined,
+  es: undefined,
+  fr: undefined,
+};
 
 // In-memory mirror of the toggle so the synthesizer hot-path doesn't
 // have to await AsyncStorage on every sentence. The boot sequence in
@@ -99,23 +123,16 @@ export async function setForeignWordsEnabled(enabled: boolean): Promise<boolean>
 }
 
 /**
- * Load (and cache) the English wordlist from the bundled .bin asset.
- *
- * Returns the Set, or null if loading failed (in which case the helper
- * silently no-ops on subsequent calls — see `wrapForeignWords`).
- *
- * Safe to call repeatedly: subsequent calls hit the cache.
+ * Decode a gzipped UTF-8 wordlist bundled as an asset and return the
+ * resulting Set of lowercased headwords. Used internally for both the
+ * English wordlist and the per-language whitelists.
  */
-export async function ensureEnglishWordsLoaded(): Promise<Set<string> | null> {
-  if (englishWordsCache !== undefined) return englishWordsCache;
+async function loadWordlistAsset(assetModule: number, label: string): Promise<Set<string> | null> {
   try {
-    const asset = Asset.fromModule(ENGLISH_WORDS_ASSET);
+    const asset = Asset.fromModule(assetModule);
     await asset.downloadAsync();
     const src = asset.localUri || asset.uri;
-    if (!src) {
-      englishWordsCache = null;
-      return null;
-    }
+    if (!src) return null;
     const b64 = await FileSystem.readAsStringAsync(src, {
       encoding: FileSystem.EncodingType.Base64,
     });
@@ -125,18 +142,61 @@ export async function ensureEnglishWordsLoaded(): Promise<Set<string> | null> {
     const set = new Set<string>();
     for (const line of text.split('\n')) {
       const w = line.trim();
-      if (w) set.add(w);
+      if (w) set.add(w.toLowerCase());
     }
-    englishWordsCache = set;
     // eslint-disable-next-line no-console
-    console.log(`[foreignWords] Loaded ${set.size} English headwords (${plain.length}B plain, ${gz.length}B gzipped)`);
+    console.log(`[foreignWords] Loaded ${set.size} ${label} headwords (${plain.length}B plain, ${gz.length}B gzipped)`);
     return set;
   } catch (e) {
     // eslint-disable-next-line no-console
-    console.warn('[foreignWords] Failed to load English wordlist:', e);
-    englishWordsCache = null;
+    console.warn(`[foreignWords] Failed to load ${label} wordlist:`, e);
     return null;
   }
+}
+
+/**
+ * Load (and cache) the English wordlist + per-language whitelists from
+ * the bundled .bin assets.
+ *
+ * Returns the English Set, or null if loading failed (in which case the
+ * helper silently no-ops on subsequent calls — see `wrapForeignWords`).
+ *
+ * Safe to call repeatedly: subsequent calls hit the cache.
+ *
+ * The per-language whitelists are loaded in parallel as a fire-and-forget
+ * side-effect — they don't block the returned promise. `wrapForeignWords`
+ * tolerates a not-yet-loaded whitelist by skipping the subtraction step
+ * (fail-open with English-only matching).
+ */
+export async function ensureEnglishWordsLoaded(): Promise<Set<string> | null> {
+  // Kick off whitelist loads in parallel on the first call. They mutate
+  // the module-level cache directly; the returned promise we DON'T await
+  // (the English set is the only thing we promise to deliver here).
+  for (const lang of Object.keys(WHITELIST_ASSETS)) {
+    if (whitelistCache[lang] === undefined) {
+      whitelistCache[lang] = null; // mark "in-flight" to dedupe
+      const assetModule = WHITELIST_ASSETS[lang];
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      loadWordlistAsset(assetModule, `${lang.toUpperCase()} whitelist`).then((set) => {
+        whitelistCache[lang] = set; // may also be null on failure
+      });
+    }
+  }
+
+  if (englishWordsCache !== undefined) return englishWordsCache;
+  const set = await loadWordlistAsset(ENGLISH_WORDS_ASSET, 'English');
+  englishWordsCache = set;
+  return set;
+}
+
+/**
+ * Return the whitelist for a given base language code, or null if it
+ * isn't loaded yet / failed / doesn't exist. Synchronous lookup so
+ * `wrapForeignWords` can stay synchronous.
+ */
+function getWhitelist(baseLang: string): Set<string> | null {
+  const w = whitelistCache[baseLang];
+  return w ?? null;
 }
 
 /**
@@ -190,7 +250,10 @@ function tokenLooksLikePossibleEnglish(token: string): boolean {
  *
  * @param srcLang Source language code (it / fr / de / es / en). When
  * 'en', the function is a no-op (you don't switch to English from
- * English).
+ * English). When 'de' / 'es' / 'fr', the corresponding whitelist is
+ * subtracted from the candidate set so source-language words that
+ * happen to also exist in English (e.g. "abandon" in French) are NOT
+ * wrapped.
  */
 export function wrapForeignWords(text: string, srcLang: string): string {
   if (!foreignWordsEnabled) return text;
@@ -200,6 +263,13 @@ export function wrapForeignWords(text: string, srcLang: string): string {
   if (base === 'en') return text;
   const set = englishWordsCache;
   if (!set) return text; // wordlist not loaded — fail open with plain text
+
+  // Per-language stop-list. For IT we have no runtime whitelist because
+  // homographs were already subtracted at build time inside the bundled
+  // English asset itself. For DE/ES/FR we look up the runtime whitelist
+  // and skip any token that the user's source language would normally
+  // pronounce correctly without switching.
+  const stopList = getWhitelist(base); // null when not applicable / not yet loaded
 
   // Split text into a sequence of "word" / "non-word" runs so we can
   // wrap only the word runs and leave punctuation/spaces untouched.
@@ -223,8 +293,14 @@ export function wrapForeignWords(text: string, srcLang: string): string {
       out += escapeXml(chunk);
       continue;
     }
-    // Word chunk: see if it matches the English wordlist.
-    if (tokenLooksLikePossibleEnglish(chunk) && set.has(chunk.toLowerCase())) {
+    // Word chunk: see if it matches the English wordlist AND is NOT in
+    // the source-language whitelist.
+    const lower = chunk.toLowerCase();
+    if (
+      tokenLooksLikePossibleEnglish(chunk) &&
+      set.has(lower) &&
+      !(stopList && stopList.has(lower))
+    ) {
       // Wrap, preserving the original casing.
       out += `<voice name="en">${chunk}</voice>`;
       wrappedAny = true;
