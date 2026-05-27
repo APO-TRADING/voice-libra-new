@@ -203,20 +203,23 @@ export function wrapForeignWords(text: string, srcLang: string): string {
 
   // Split text into a sequence of "word" / "non-word" runs so we can
   // wrap only the word runs and leave punctuation/spaces untouched.
-  // Word characters: A-Z, a-z, apostrophe (for English contractions
-  // like "don't" — though we filter those out via the length/charset
-  // check inside the body). Accented Latin letters (à é ñ ü ß …) are
-  // intentionally NOT in the word class so a single token like
-  // "città" stays in ONE run and our matcher skips it as
-  // tokenLooksLikePossibleEnglish() returns false.
-  const re = /[A-Za-z']+|[^A-Za-z']+/g;
+  //
+  // v2.7.7-Audiobook-Tuned: the word class is now `\p{L}` (any Unicode
+  // letter) + apostrophe, NOT just `[A-Za-z]` + apostrophe. This is
+  // critical because the old ASCII-only regex would split "voltò" into
+  // "volt" (4-char ASCII matching our wordlist!) + "ò" (separate run),
+  // wrongly wrapping "volt" as English. With `\p{L}` the entire
+  // "voltò" becomes ONE token of 5 letters; tokenLooksLikePossibleEnglish
+  // then rejects it (the function-level loop demands ASCII-only) so
+  // the Italian word is kept as-is.
+  const re = /[\p{L}']+|[^\p{L}']+/gu;
   let out = '';
   let wrappedAny = false;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const chunk = m[0];
     // Non-word chunk: just escape and keep.
-    if (!/^[A-Za-z']+$/.test(chunk)) {
+    if (!/^[\p{L}']+$/u.test(chunk)) {
       out += escapeXml(chunk);
       continue;
     }
