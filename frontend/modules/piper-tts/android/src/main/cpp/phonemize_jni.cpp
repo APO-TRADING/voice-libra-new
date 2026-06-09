@@ -25,6 +25,8 @@
 #include <jni.h>
 #include <android/log.h>
 #include <cstring>
+#include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <vector>
 #include <mutex>
@@ -56,6 +58,169 @@ static std::string jstringToString(JNIEnv* env, jstring jstr) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// v1.0.5 — Phoneme stretch helpers.
+//
+// English phonemes pre-computed by `nativePhonemizeAs(word, "en-us")` and
+// spliced into an italian sentence via the `<phoneme alphabet="espeak"
+// ph="…" stretch="N">word</phoneme>` SSML tag tend to be rendered ~25%
+// faster than the surrounding Italian by Piper VITS — the model is trained
+// to Italian prosody and naturally "eats" the foreign sequence.
+//
+// We compensate by DUPLICATING IPA vowel characters proportionally to the
+// stretch factor:
+//   stretch 1.00 → no duplication (passthrough)
+//   stretch 1.25 → +25% length → 1 vowel out of 4 duplicated
+//   stretch 1.50 → +50% length → 1 vowel out of 2 duplicated
+//   stretch 2.00 → +100%       → every vowel duplicated
+//
+// Why vowels: Piper VITS allocates ~70% of the syllable duration to the
+// nucleus vowel, so doubling a vowel character is the most direct way to
+// stretch the syllable. We DON'T touch consonants (their duration is
+// mostly invariant in the VITS duration predictor) or stress markers
+// (ˈ ˌ — U+02C8/U+02CC — those are typographical, not durational).
+//
+// The duplication uses an "accumulator" so the visual effect is even —
+// e.g. stretch 1.25 on "ə ɛ ɪ ɔ ʌ" (5 vowels) duplicates exactly 1 of
+// them: "ə ɛ ɪ ɪ ɔ ʌ" rather than back-clumping all duplicates at the end.
+// ---------------------------------------------------------------------------
+
+// UTF-8 decode of one character starting at s[0]. On success writes the
+// Unicode code point to *cp and returns the byte length (1-4). On invalid
+// input returns 0 and leaves *cp untouched.
+static size_t utf8DecodeOne(const char* s, size_t maxLen, uint32_t* cp) {
+  if (maxLen == 0) return 0;
+  unsigned char b0 = (unsigned char)s[0];
+  if ((b0 & 0x80) == 0) { *cp = b0; return 1; }
+  if ((b0 & 0xE0) == 0xC0 && maxLen >= 2) {
+    *cp = ((uint32_t)(b0 & 0x1F) << 6)
+        |  ((uint32_t)((unsigned char)s[1] & 0x3F));
+    return 2;
+  }
+  if ((b0 & 0xF0) == 0xE0 && maxLen >= 3) {
+    *cp = ((uint32_t)(b0 & 0x0F) << 12)
+        | ((uint32_t)((unsigned char)s[1] & 0x3F) << 6)
+        |  ((uint32_t)((unsigned char)s[2] & 0x3F));
+    return 3;
+  }
+  if ((b0 & 0xF8) == 0xF0 && maxLen >= 4) {
+    *cp = ((uint32_t)(b0 & 0x07) << 18)
+        | ((uint32_t)((unsigned char)s[1] & 0x3F) << 12)
+        | ((uint32_t)((unsigned char)s[2] & 0x3F) << 6)
+        |  ((uint32_t)((unsigned char)s[3] & 0x3F));
+    return 4;
+  }
+  return 0;
+}
+
+// IPA vowel detector. Covers:
+//   - ASCII a/e/i/o/u/y
+//   - Latin Extended: æ ø œ
+//   - IPA Block (U+0250–U+028F) vowel range
+//
+// NB: we INTENTIONALLY exclude IPA consonants from the IPA block (e.g.
+// ɟ U+025F palatal stop, ɸ U+0278 bilabial fricative). The list below
+// is whitelist-only: anything not in it is treated as a non-vowel.
+static bool isIpaVowel(uint32_t cp) {
+  switch (cp) {
+    case 'a': case 'A':
+    case 'e': case 'E':
+    case 'i': case 'I':
+    case 'o': case 'O':
+    case 'u': case 'U':
+    case 'y': case 'Y':
+      return true;
+    case 0x00E6: case 0x00C6:  // æ Æ
+    case 0x00F8: case 0x00D8:  // ø Ø
+    case 0x0153: case 0x0152:  // œ Œ
+    case 0x0250:  // ɐ open-mid central unrounded
+    case 0x0251:  // ɑ open back unrounded
+    case 0x0252:  // ɒ open back rounded
+    case 0x0254:  // ɔ open-mid back rounded
+    case 0x0259:  // ə schwa
+    case 0x025A:  // ɚ rhotic schwa
+    case 0x025B:  // ɛ open-mid front unrounded
+    case 0x025C:  // ɜ open-mid central unrounded
+    case 0x025D:  // ɝ rhotic mid central
+    case 0x025E:  // ɞ open-mid central rounded
+    case 0x0264:  // ɤ close-mid back unrounded
+    case 0x0268:  // ɨ close central unrounded
+    case 0x026A:  // ɪ near-close near-front unrounded
+    case 0x026F:  // ɯ close back unrounded
+    case 0x0275:  // ɵ close-mid central rounded
+    case 0x0276:  // ɶ open front rounded
+    case 0x0279:  // ɹ approximant — NOT vowel, but often acts like one
+                  // in syllabic position. We keep it OUT to be safe.
+                  // (Listed here for documentation only — return false.)
+      return cp != 0x0279;
+    case 0x0289:  // ʉ close central rounded
+    case 0x028A:  // ʊ near-close near-back rounded
+    case 0x028C:  // ʌ open-mid back unrounded
+    case 0x028F:  // ʏ near-close near-front rounded
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Returns a stretched copy of `ipa` (UTF-8). If `factor` <= 1.0 the input
+// is returned unchanged (zero-copy fast path).
+//
+// Algorithm:
+//   - extra = factor - 1.0   (fraction of vowels to duplicate)
+//   - walk the string utf-8-character by utf-8-character
+//   - emit every character once
+//   - if the character is an IPA vowel, accumulate `extra` into a
+//     counter; whenever the counter >= 1.0, emit the vowel ONE more
+//     time and decrement the counter. This produces an even spread
+//     of duplicates (no end-clumping).
+//
+// Examples (stretch = 1.25, extra = 0.25):
+//   "ə"           → "ə"        (counter 0.25 < 1, no dup)
+//   "ə ɛ ɪ ɔ"     → "ə ɛ ɪ ɪ ɔ" (4 vowels, counter reaches 1.0 at the 4th
+//                                vowel ɪ — duplicated; counter back to 0)
+//   "ɡ l ˈɒ k"    → "ɡ l ˈɒ k"  (1 vowel only, counter 0.25 < 1, no dup)
+//   "ɡ l ˈɒ k ə"  → "ɡ l ˈɒ k ə" (2 vowels, counter 0.50 < 1, no dup)
+//   Stretching only really starts mattering for words with >= 4 vowels,
+//   which is fine — short words don't suffer the duration mismatch.
+static std::string stretchIpaVowels(const std::string& ipa, double factor) {
+  if (factor <= 1.0 || ipa.empty()) return ipa;
+  // Cap to avoid pathological inputs (defensive).
+  if (factor > 3.0) factor = 3.0;
+  const double extraPerVowel = factor - 1.0;
+  std::string out;
+  out.reserve((size_t)(ipa.size() * (factor + 0.1)));
+  double accumulator = 0.0;
+  size_t i = 0;
+  int dupCount = 0;
+  while (i < ipa.size()) {
+    uint32_t cp = 0;
+    size_t len = utf8DecodeOne(ipa.c_str() + i, ipa.size() - i, &cp);
+    if (len == 0) {
+      // Malformed UTF-8 byte — copy as-is and advance 1 byte to recover.
+      out.push_back(ipa[i]);
+      i += 1;
+      continue;
+    }
+    // Always emit the character.
+    out.append(ipa, i, len);
+    if (isIpaVowel(cp)) {
+      accumulator += extraPerVowel;
+      while (accumulator >= 1.0) {
+        out.append(ipa, i, len);  // duplicate the vowel
+        accumulator -= 1.0;
+        dupCount += 1;
+      }
+    }
+    i += len;
+  }
+  if (dupCount > 0) {
+    LOGI("stretchIpaVowels: factor=%.2f in=%zuB out=%zuB dup=%d",
+         factor, ipa.size(), out.size(), dupCount);
+  }
+  return out;
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativeInit(
     JNIEnv* env, jclass, jstring jDataPath) {
@@ -72,7 +237,7 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativeInit(
   // v1.0.4 marker confirms the JIT Phoneme-Mapping pipeline is live:
   // <phoneme alphabet="espeak" ph="…">word</phoneme> is supported and
   // the new nativePhonemizeAs() JNI entrypoint is exposed.
-  LOGI("nativeInit: dataPath=%s build=v1.0.4-JIT-PHONEME-MAPPING", dataPath.c_str());
+  LOGI("nativeInit: dataPath=%s build=v1.0.5-PHONEME-STRETCH", dataPath.c_str());
 
   // AUDIO_OUTPUT_RETRIEVAL means we won't actually output audio — we only
   // need espeak to compute phonemes. Buffer length is in ms (zero means
@@ -260,7 +425,7 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
 
     if (isPhoneme) {
       // ---------------------------------------------------------------
-      // <phoneme alphabet="espeak" ph="PHONEMES">word</phoneme>
+      // <phoneme alphabet="espeak" ph="PHONEMES" stretch="N">word</phoneme>
       //
       // We inject PHONEMES directly into the output stream WITHOUT any
       // espeak voice switch. This is the v1.0.4 JIT pipeline: the JS
@@ -269,23 +434,57 @@ Java_com_beppeaudiobooks_pipertts_PhonemizerNative_nativePhonemize(
       // splice the result in. The current espeak voice stays untouched
       // for the entire sentence → no clause-boundary disruptions.
       //
-      // Robust attribute parsing: accept the `ph` attribute in EITHER
-      // order (ph="…" alphabet="espeak", OR alphabet="espeak" ph="…").
+      // v1.0.5 — the optional `stretch="N"` attribute (typical N=1.25)
+      // tells us to slow down the inner IPA sequence so the foreign
+      // word doesn't get visually "eaten" by Piper's Italian-trained
+      // duration predictor. We implement the slowdown by duplicating
+      // IPA vowel characters proportionally to the stretch factor
+      // (see stretchIpaVowels() at top of file for the algorithm).
+      //
+      // Robust attribute parsing: `ph` and `stretch` may appear in
+      // any order inside the open tag.
       // ---------------------------------------------------------------
-      size_t phStart = text.find("ph=\"", openTag);
-      if (phStart == std::string::npos || phStart > openTag + 64) {
+      // Locate the end of the open tag first so attribute searches
+      // can't run past it (defensive).
+      size_t openEnd = text.find('>', openTag);
+      if (openEnd == std::string::npos) { pos = openTag + 9; continue; }
+      const std::string openTagContent = text.substr(openTag, openEnd - openTag);
+      // Parse ph="…"
+      size_t phStart = openTagContent.find("ph=\"");
+      if (phStart == std::string::npos) {
         pos = openTag + 9;  // skip "<phoneme " and resync
         continue;
       }
       phStart += 4;
-      size_t phEnd = text.find('"', phStart);
+      size_t phEnd = openTagContent.find('"', phStart);
       if (phEnd == std::string::npos) { pos = openTag + 9; continue; }
-      std::string phStr = decodeXmlEntities(text.substr(phStart, phEnd - phStart));
+      std::string phStr = decodeXmlEntities(openTagContent.substr(phStart, phEnd - phStart));
+      // Parse stretch="…" (OPTIONAL). Default 1.0 = no stretch.
+      double stretch = 1.0;
+      size_t stStart = openTagContent.find("stretch=\"");
+      if (stStart != std::string::npos) {
+        stStart += 9;
+        size_t stEnd = openTagContent.find('"', stStart);
+        if (stEnd != std::string::npos) {
+          std::string stStr = openTagContent.substr(stStart, stEnd - stStart);
+          try {
+            stretch = std::stod(stStr);
+          } catch (...) { stretch = 1.0; }
+          // Sanity clamp — anything outside [1.0, 3.0] is ignored.
+          if (stretch < 1.0 || stretch > 3.0 || !(stretch == stretch)) {  // NaN check
+            stretch = 1.0;
+          }
+        }
+      }
 
-      size_t openEnd = text.find('>', phEnd);
-      if (openEnd == std::string::npos) { pos = openTag + 9; continue; }
       size_t closeTag = text.find("</phoneme>", openEnd);
       if (closeTag == std::string::npos) closeTag = text.size();
+
+      // Apply v1.0.5 stretch (vowel duplication).
+      if (stretch > 1.0 && !phStr.empty()) {
+        std::string stretched = stretchIpaVowels(phStr, stretch);
+        if (!stretched.empty()) phStr = stretched;
+      }
 
       // Insert the pre-computed phonemes. Pad with a single space on
       // each side so the espeak prosody on the next plain segment
